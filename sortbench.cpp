@@ -11,14 +11,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdint>
-#include <cstring>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <exception>
-#include <fstream>
-#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -96,25 +96,43 @@
 using Clock = std::chrono::steady_clock;
 using ms = std::chrono::duration<double, std::milli>;
 
-enum class Dist : int { random = 0, partial = 1, dups = 2, reverse = 3,
-                        sorted = 4, saw = 5, runs = 6, gauss = 7, exp = 8, zipf = 9 };
+enum class Dist : int {
+  random = 0,
+  partial = 1,
+  dups = 2,
+  reverse = 3,
+  sorted = 4,
+  saw = 5,
+  runs = 6,
+  gauss = 7,
+  exp = 8,
+  zipf = 9
+};
 static constexpr std::array<std::string_view, 10> kDistNames{
-    "random", "partial", "dups",    "reverse", "sorted",
-    "saw",     "runs",    "gauss",  "exp",     "zipf"};
+    "random", "partial", "dups",  "reverse", "sorted",
+    "saw",    "runs",    "gauss", "exp",     "zipf"};
 
 enum class OutFmt : int { csv = 0, table = 1, json = 2, jsonl = 3 };
 enum class PlotStyle : int { boxes = 0, lines = 1 };
 
-enum class ElemType : int { i32, u32, i64, u64, f32, f64 };
+enum class ElemType : int { i32, u32, i64, u64, f32, f64, str };
 
 static inline std::string_view elem_type_name(ElemType t) {
   switch (t) {
-  case ElemType::i32: return "i32";
-  case ElemType::u32: return "u32";
-  case ElemType::i64: return "i64";
-  case ElemType::u64: return "u64";
-  case ElemType::f32: return "f32";
-  case ElemType::f64: return "f64";
+  case ElemType::i32:
+    return "i32";
+  case ElemType::u32:
+    return "u32";
+  case ElemType::i64:
+    return "i64";
+  case ElemType::u64:
+    return "u64";
+  case ElemType::f32:
+    return "f32";
+  case ElemType::f64:
+    return "f64";
+  case ElemType::str:
+    return "str";
   }
   return "i32";
 }
@@ -139,8 +157,11 @@ struct Options {
   bool print_build = false;                    // show compiler/flags used
   std::optional<std::string> build_plugin_src; // path to plugin .cpp
   std::optional<std::string> build_plugin_out; // output .so path
-  std::optional<std::string> init_plugin_out;  // path to write scaffold plugin .cpp
-  std::optional<std::string> results_path;     // results output path
+  std::optional<std::string>
+      init_plugin_out;                     // path to write scaffold plugin .cpp
+  std::optional<std::string> results_path; // results output path
+  bool no_file = false;                    // suppress writing results files
+  std::optional<std::string> output_dir;   // directory for plot artifacts
   // Plotting options
   std::optional<std::string> plot_path; // output image path (png/jpeg)
   std::string plot_title;               // optional plot title
@@ -148,14 +169,16 @@ struct Options {
   int plot_h = 600;                     // plot height
   bool keep_plot_artifacts = false;     // keep .dat/.gp files
   ElemType type = ElemType::i32;        // element type
-  bool assert_sorted = false;           // assert results are sorted after each run
-  int threads = 0;                      // max threads (0 = default)
-  std::vector<std::regex> algo_regex;   // optional regex filters for algo names
-  bool multi_plot_accumulate = false;   // internal: accumulate plot data, no gnuplot per call
-  std::optional<std::string> plot_dat_path; // internal: where to write .dat for this call
+  bool assert_sorted = false; // assert results are sorted after each run
+  int threads = 0;            // max threads (0 = default)
+  std::vector<std::regex> algo_regex; // optional regex filters for algo names
+  bool multi_plot_accumulate =
+      false; // internal: accumulate plot data, no gnuplot per call
+  std::optional<std::string>
+      plot_dat_path; // internal: where to write .dat for this call
   // Plot layout/style
-  int plot_rows = 0;                    // 0 = auto (Ndists), otherwise rows
-  int plot_cols = 0;                    // 0 = auto (1), otherwise cols
+  int plot_rows = 0;                       // 0 = auto (Ndists), otherwise rows
+  int plot_cols = 0;                       // 0 = auto (1), otherwise cols
   PlotStyle plot_style = PlotStyle::boxes; // boxes or lines
 };
 
@@ -196,55 +219,75 @@ static std::optional<Dist> parse_dist(std::string s) {
   return std::nullopt;
 }
 
-static std::size_t parse_size_expr(const std::string& s) {
+static std::size_t parse_size_expr(const std::string &s) {
   // Accept plain integers, scientific (e-notation), and k/m/g suffixes
   try {
     // fast path for pure integer
-    size_t pos = 0; auto v = std::stoull(s, &pos, 10);
-    if (pos == s.size()) return static_cast<std::size_t>(v);
-  } catch (...) {}
+    size_t pos = 0;
+    auto v = std::stoull(s, &pos, 10);
+    if (pos == s.size())
+      return static_cast<std::size_t>(v);
+  } catch (...) {
+  }
   // Suffixes
   if (!s.empty()) {
-    char last = static_cast<char>(std::tolower(static_cast<unsigned char>(s.back())));
+    char last =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(s.back())));
     if (last == 'k' || last == 'm' || last == 'g') {
-      auto base = s.substr(0, s.size()-1);
+      auto base = s.substr(0, s.size() - 1);
       double d = std::strtod(base.c_str(), nullptr);
-      double mul = (last=='k'?1e3:(last=='m'?1e6:1e9));
+      double mul = (last == 'k' ? 1e3 : (last == 'm' ? 1e6 : 1e9));
       return static_cast<std::size_t>(d * mul);
     }
   }
   // Scientific or general double
   double d = std::strtod(s.c_str(), nullptr);
-  if (d <= 0) throw std::runtime_error("Invalid size expression: " + s);
+  if (d <= 0)
+    throw std::runtime_error("Invalid size expression: " + s);
   return static_cast<std::size_t>(d);
 }
 
 static void print_usage(const char *argv0) {
   std::cerr << "Usage: " << argv0
-            << " [--N size|start-end] [--dist random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf]"
-               " [--repeat k] [--warmup w] [--algo name[,name...]] [--seed s] [--no-header] "
+            << " [--N size|start-end] [--dist "
+               "random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf]"
+               " [--repeat k] [--warmup w] [--algo name[,name...]] [--seed s] "
+               "[--no-header] "
                "[--verify]"
                " [--partial-pct p] [--dups-k k] [--list] [--plugin lib.so ...] "
-               "[--format csv|table|json|jsonl] [--algo-re REGEX] [--threads K] [--results PATH] [--init-plugin [path.cpp]]\n";
-  std::cerr << "       --dist can be repeated or take multiple values (e.g., --dist random dups or --dist=random,dups)\n";
+               "[--format csv|table|json|jsonl] [--algo-re REGEX] [--threads "
+               "K] [--results PATH] [--init-plugin [path.cpp]]\n";
+  std::cerr << "       --dist can be repeated or take multiple values (e.g., "
+               "--dist random dups or --dist=random,dups)\n";
   std::cerr << "       --print-build (print compiler/flags used)\n";
   std::cerr << "       --build-plugin <src.cpp> --out <lib.so> (compile plugin "
                "with recorded flags)\n";
-  std::cerr << "       --plot <out.png|.jpg> [--plot-title T] [--plot-size WxH] (generate a plot with med/min/max)\n";
-  std::cerr << "       --keep-plot-artifacts (keep temporary .dat/.gp next to the image)\n";
-  std::cerr << "       --plot-layout RxC (multiplot grid when multiple --dist given; default = Nx1)\n";
-  std::cerr << "       --plot-style boxes|lines (default boxes; lines uses linespoints + yerrorbars)\n";
-  std::cerr << "       --type i32|u32|i64|u64|f32|f64 (element type; default i32)\n";
-  std::cerr << "       --assert-sorted (check each run result is sorted; fails fast)\n";
+  std::cerr << "       --no-file (print to stdout only; no results files)\n";
+  std::cerr << "       --plot <out.png|.jpg> [--plot-title T] [--plot-size "
+               "WxH] (generate a plot with med/min/max)\n";
+  std::cerr << "       --output DIR (write plot artifacts .dat/.gp under DIR)\n";
+  std::cerr << "       --keep-plot-artifacts (keep temporary .dat/.gp next to "
+               "the image)\n";
+  std::cerr << "       --plot-layout RxC (multiplot grid when multiple --dist "
+               "given; default = Nx1)\n";
+  std::cerr << "       --plot-style boxes|lines (default boxes; lines uses "
+               "linespoints + yerrorbars)\n";
+  std::cerr << "       --type i32|u32|i64|u64|f32|f64|str (element type; "
+               "default i32)\n";
+  std::cerr << "       --assert-sorted (check each run result is sorted; fails "
+               "fast)\n";
 }
 
 static Options parse_args(int argc, char **argv) {
   Options opt;
   for (int i = 1; i < argc; ++i) {
     std::string_view a = argv[i];
-    auto get_value_inline = [&](std::string_view arg, std::string_view key)->std::optional<std::string>{
-      if (arg.size() > key.size()+1 && arg.substr(0, key.size()) == key && arg[key.size()] == '=') {
-        return std::string(arg.substr(key.size()+1));
+    auto get_value_inline =
+        [&](std::string_view arg,
+            std::string_view key) -> std::optional<std::string> {
+      if (arg.size() > key.size() + 1 && arg.substr(0, key.size()) == key &&
+          arg[key.size()] == '=') {
+        return std::string(arg.substr(key.size() + 1));
       }
       return std::nullopt;
     };
@@ -255,7 +298,7 @@ static Options parse_args(int argc, char **argv) {
       }
       return std::string(argv[++i]);
     };
-    if (a == "--N" || a == "-N" || a.rfind("--N=",0)==0) {
+    if (a == "--N" || a == "-N" || a.rfind("--N=", 0) == 0) {
       std::string v = get_value_inline(a, "--N").value_or(need_value(a));
       // Support range: start-end
       auto dash = v.find('-');
@@ -266,55 +309,72 @@ static Options parse_args(int argc, char **argv) {
         std::string s2 = v.substr(dash + 1);
         std::size_t start = parse_size_expr(s1);
         std::size_t end = parse_size_expr(s2);
-        if (start == 0 || end == 0 || start > end) throw std::runtime_error("Invalid --N range");
+        if (start == 0 || end == 0 || start > end)
+          throw std::runtime_error("Invalid --N range");
         opt.N = start;
         opt.Ns.clear();
         // Geometric sweep by powers of ~2
         std::size_t cur = start;
         while (cur < end) {
           opt.Ns.push_back(cur);
-          if (cur > (std::numeric_limits<std::size_t>::max() >> 1)) break;
+          if (cur > (std::numeric_limits<std::size_t>::max() >> 1))
+            break;
           std::size_t next = cur << 1;
-          if (next <= cur) break;
+          if (next <= cur)
+            break;
           cur = next;
         }
-        if (opt.Ns.empty() || opt.Ns.back() != end) opt.Ns.push_back(end);
+        if (opt.Ns.empty() || opt.Ns.back() != end)
+          opt.Ns.push_back(end);
       }
-    } else if (a == "--dist" || a.rfind("--dist=",0)==0) {
+    } else if (a == "--dist" || a.rfind("--dist=", 0) == 0) {
       // Support: --dist val [val2 val3 ...] and --dist=val1,val2
-      std::string firstv = get_value_inline(a, "--dist").value_or(need_value(a));
-      auto push_dist = [&](const std::string& s){
+      std::string firstv =
+          get_value_inline(a, "--dist").value_or(need_value(a));
+      auto push_dist = [&](const std::string &s) {
         auto dd = parse_dist(s);
-        if (!dd) throw std::runtime_error(std::string("Invalid --dist: ") + s);
+        if (!dd)
+          throw std::runtime_error(std::string("Invalid --dist: ") + s);
         opt.dists.push_back(*dd);
       };
       // Comma-separated list in the first token
-      size_t start = 0; bool any = false;
+      size_t start = 0;
+      bool any = false;
       while (start <= firstv.size()) {
         size_t pos = firstv.find(',', start);
-        std::string token = firstv.substr(start, pos == std::string::npos ? std::string::npos : pos - start);
-        if (!token.empty()) { push_dist(token); any = true; }
-        if (pos == std::string::npos) break; else start = pos + 1;
+        std::string token = firstv.substr(
+            start, pos == std::string::npos ? std::string::npos : pos - start);
+        if (!token.empty()) {
+          push_dist(token);
+          any = true;
+        }
+        if (pos == std::string::npos)
+          break;
+        else
+          start = pos + 1;
       }
       // Space-separated additional values: keep consuming until next flag
       while (i + 1 < argc) {
         std::string_view peek = argv[i + 1];
-        if (!peek.empty() && peek[0] == '-') break;
+        if (!peek.empty() && peek[0] == '-')
+          break;
         std::string sv = std::string(argv[++i]);
         push_dist(sv);
         any = true;
       }
-      if (any) opt.dist = opt.dists.front();
-    } else if (a == "--repeat" || a == "-r" || a.rfind("--repeat=",0)==0) {
+      if (any)
+        opt.dist = opt.dists.front();
+    } else if (a == "--repeat" || a == "-r" || a.rfind("--repeat=", 0) == 0) {
       std::string v = get_value_inline(a, "--repeat").value_or(need_value(a));
       opt.repeats = std::stoi(v);
       if (opt.repeats <= 0)
         opt.repeats = 1;
-    } else if (a == "--warmup" || a.rfind("--warmup=",0)==0) {
+    } else if (a == "--warmup" || a.rfind("--warmup=", 0) == 0) {
       std::string v = get_value_inline(a, "--warmup").value_or(need_value(a));
       opt.warmup = std::stoi(v);
-      if (opt.warmup < 0) opt.warmup = 0;
-    } else if (a == "--algo" || a == "-a" || a.rfind("--algo=",0)==0) {
+      if (opt.warmup < 0)
+        opt.warmup = 0;
+    } else if (a == "--algo" || a == "-a" || a.rfind("--algo=", 0) == 0) {
       std::string v = get_value_inline(a, "--algo").value_or(need_value(a));
       // Allow comma-separated list
       std::string cur;
@@ -329,19 +389,20 @@ static Options parse_args(int argc, char **argv) {
       }
       if (!cur.empty())
         opt.algos.push_back(to_lower(cur));
-    } else if (a == "--seed" || a.rfind("--seed=",0)==0) {
+    } else if (a == "--seed" || a.rfind("--seed=", 0) == 0) {
       std::string v = get_value_inline(a, "--seed").value_or(need_value(a));
       opt.seed = std::stoull(v);
     } else if (a == "--no-header") {
       opt.csv_header = false;
-    } else if (a == "--partial-pct" || a.rfind("--partial-pct=",0)==0) {
-      std::string v = get_value_inline(a, "--partial-pct").value_or(need_value(a));
+    } else if (a == "--partial-pct" || a.rfind("--partial-pct=", 0) == 0) {
+      std::string v =
+          get_value_inline(a, "--partial-pct").value_or(need_value(a));
       opt.partial_shuffle_pct = std::stoi(v);
       if (opt.partial_shuffle_pct < 0)
         opt.partial_shuffle_pct = 0;
       if (opt.partial_shuffle_pct > 100)
         opt.partial_shuffle_pct = 100;
-    } else if (a == "--dups-k" || a.rfind("--dups-k=",0)==0) {
+    } else if (a == "--dups-k" || a.rfind("--dups-k=", 0) == 0) {
       std::string v = get_value_inline(a, "--dups-k").value_or(need_value(a));
       opt.dup_values = std::stoi(v);
       if (opt.dup_values < 1)
@@ -350,7 +411,7 @@ static Options parse_args(int argc, char **argv) {
       opt.verify = true;
     } else if (a == "--list") {
       opt.list = true;
-    } else if (a == "--plugin" || a.rfind("--plugin=",0)==0) {
+    } else if (a == "--plugin" || a.rfind("--plugin=", 0) == 0) {
       if (auto iv = get_value_inline(a, "--plugin")) {
         opt.plugin_paths.push_back(*iv);
       } else {
@@ -358,7 +419,7 @@ static Options parse_args(int argc, char **argv) {
           throw std::runtime_error("Missing value for --plugin");
         opt.plugin_paths.push_back(std::string(argv[++i]));
       }
-    } else if (a == "--format" || a.rfind("--format=",0)==0) {
+    } else if (a == "--format" || a.rfind("--format=", 0) == 0) {
       std::string v = get_value_inline(a, "--format").value_or(need_value(a));
       v = to_lower(std::move(v));
       if (v == "csv")
@@ -370,18 +431,22 @@ static Options parse_args(int argc, char **argv) {
       else if (v == "jsonl")
         opt.format = OutFmt::jsonl;
       else
-        throw std::runtime_error("Invalid --format (csv|table|json|jsonl): " + v);
+        throw std::runtime_error("Invalid --format (csv|table|json|jsonl): " +
+                                 v);
     } else if (a == "--print-build") {
       opt.print_build = true;
-    } else if (a == "--build-plugin" || a.rfind("--build-plugin=",0)==0) {
-      opt.build_plugin_src = get_value_inline(a, "--build-plugin").value_or(need_value(a));
-    } else if (a == "--out" || a.rfind("--out=",0)==0) {
-      opt.build_plugin_out = get_value_inline(a, "--out").value_or(need_value(a));
-    } else if (a == "--init-plugin" || a.rfind("--init-plugin=",0)==0) {
+    } else if (a == "--build-plugin" || a.rfind("--build-plugin=", 0) == 0) {
+      opt.build_plugin_src =
+          get_value_inline(a, "--build-plugin").value_or(need_value(a));
+    } else if (a == "--out" || a.rfind("--out=", 0) == 0) {
+      opt.build_plugin_out =
+          get_value_inline(a, "--out").value_or(need_value(a));
+    } else if (a == "--init-plugin" || a.rfind("--init-plugin=", 0) == 0) {
       if (auto iv = get_value_inline(a, "--init-plugin")) {
         opt.init_plugin_out = *iv;
       } else {
-        // Optional value; default to plugins/my_plugin.cpp if none provided or next token is a flag
+        // Optional value; default to plugins/my_plugin.cpp if none provided or
+        // next token is a flag
         if (i + 1 < argc) {
           std::string_view peek = argv[i + 1];
           if (!peek.empty() && peek[0] != '-') {
@@ -393,14 +458,22 @@ static Options parse_args(int argc, char **argv) {
           opt.init_plugin_out = std::string("plugins/my_plugin.cpp");
         }
       }
-    } else if (a == "--plot" || a.rfind("--plot=",0)==0) {
+    } else if (a == "--plot" || a.rfind("--plot=", 0) == 0) {
       opt.plot_path = get_value_inline(a, "--plot").value_or(need_value(a));
-    } else if (a == "--results" || a.rfind("--results=",0)==0) {
-      opt.results_path = get_value_inline(a, "--results").value_or(need_value(a));
-    } else if (a == "--plot-title" || a.rfind("--plot-title=",0)==0) {
-      opt.plot_title = get_value_inline(a, "--plot-title").value_or(need_value(a));
-    } else if (a == "--plot-size" || a.rfind("--plot-size=",0)==0) {
-      std::string v = get_value_inline(a, "--plot-size").value_or(need_value(a));
+    } else if (a == "--results" || a.rfind("--results=", 0) == 0) {
+      opt.results_path =
+          get_value_inline(a, "--results").value_or(need_value(a));
+    } else if (a == "--no-file") {
+      opt.no_file = true;
+    } else if (a == "--output" || a.rfind("--output=", 0) == 0) {
+      opt.output_dir =
+          get_value_inline(a, "--output").value_or(need_value(a));
+    } else if (a == "--plot-title" || a.rfind("--plot-title=", 0) == 0) {
+      opt.plot_title =
+          get_value_inline(a, "--plot-title").value_or(need_value(a));
+    } else if (a == "--plot-size" || a.rfind("--plot-size=", 0) == 0) {
+      std::string v =
+          get_value_inline(a, "--plot-size").value_or(need_value(a));
       auto x = v.find('x');
       if (x == std::string::npos)
         throw std::runtime_error("--plot-size must be WxH");
@@ -408,48 +481,70 @@ static Options parse_args(int argc, char **argv) {
       opt.plot_h = std::stoi(v.substr(x + 1));
     } else if (a == "--keep-plot-artifacts") {
       opt.keep_plot_artifacts = true;
-    } else if (a == "--plot-layout" || a.rfind("--plot-layout=",0)==0) {
-      std::string v = get_value_inline(a, "--plot-layout").value_or(need_value(a));
+    } else if (a == "--plot-layout" || a.rfind("--plot-layout=", 0) == 0) {
+      std::string v =
+          get_value_inline(a, "--plot-layout").value_or(need_value(a));
       auto x = v.find('x');
-      if (x == std::string::npos) throw std::runtime_error("--plot-layout must be RxC");
+      if (x == std::string::npos)
+        throw std::runtime_error("--plot-layout must be RxC");
       opt.plot_rows = std::stoi(v.substr(0, x));
       opt.plot_cols = std::stoi(v.substr(x + 1));
-      if (opt.plot_rows <= 0 || opt.plot_cols <= 0) throw std::runtime_error("--plot-layout must be positive RxC");
-    } else if (a == "--plot-style" || a.rfind("--plot-style=",0)==0) {
-      std::string v = get_value_inline(a, "--plot-style").value_or(need_value(a));
+      if (opt.plot_rows <= 0 || opt.plot_cols <= 0)
+        throw std::runtime_error("--plot-layout must be positive RxC");
+    } else if (a == "--plot-style" || a.rfind("--plot-style=", 0) == 0) {
+      std::string v =
+          get_value_inline(a, "--plot-style").value_or(need_value(a));
       v = to_lower(std::move(v));
-      if (v == "boxes") opt.plot_style = PlotStyle::boxes;
-      else if (v == "lines") opt.plot_style = PlotStyle::lines;
-      else throw std::runtime_error("Invalid --plot-style (boxes|lines)");
-    } else if (a == "--threads" || a.rfind("--threads=",0)==0) {
+      if (v == "boxes")
+        opt.plot_style = PlotStyle::boxes;
+      else if (v == "lines")
+        opt.plot_style = PlotStyle::lines;
+      else
+        throw std::runtime_error("Invalid --plot-style (boxes|lines)");
+    } else if (a == "--threads" || a.rfind("--threads=", 0) == 0) {
       std::string v = get_value_inline(a, "--threads").value_or(need_value(a));
       opt.threads = std::stoi(v);
-      if (opt.threads < 0) opt.threads = 0;
-    } else if (a == "--type" || a.rfind("--type=",0)==0) {
+      if (opt.threads < 0)
+        opt.threads = 0;
+    } else if (a == "--type" || a.rfind("--type=", 0) == 0) {
       std::string v = get_value_inline(a, "--type").value_or(need_value(a));
       v = to_lower(std::move(v));
-      if (v == "i32") opt.type = ElemType::i32;
-      else if (v == "u32") opt.type = ElemType::u32;
-      else if (v == "i64") opt.type = ElemType::i64;
-      else if (v == "u64") opt.type = ElemType::u64;
-      else if (v == "f32") opt.type = ElemType::f32;
-      else if (v == "f64") opt.type = ElemType::f64;
-      else throw std::runtime_error("Invalid --type");
-    } else if (a == "--algo-re" || a.rfind("--algo-re=",0)==0) {
+      if (v == "i32")
+        opt.type = ElemType::i32;
+      else if (v == "u32")
+        opt.type = ElemType::u32;
+      else if (v == "i64")
+        opt.type = ElemType::i64;
+      else if (v == "u64")
+        opt.type = ElemType::u64;
+      else if (v == "f32")
+        opt.type = ElemType::f32;
+      else if (v == "f64")
+        opt.type = ElemType::f64;
+      else if (v == "str")
+        opt.type = ElemType::str;
+      else
+        throw std::runtime_error("Invalid --type");
+    } else if (a == "--algo-re" || a.rfind("--algo-re=", 0) == 0) {
       std::string v = get_value_inline(a, "--algo-re").value_or(need_value(a));
       // Allow comma-separated regex list
       size_t start = 0;
       while (start <= v.size()) {
         size_t pos = v.find(',', start);
-        std::string pat = v.substr(start, pos == std::string::npos ? std::string::npos : pos - start);
+        std::string pat = v.substr(
+            start, pos == std::string::npos ? std::string::npos : pos - start);
         if (!pat.empty()) {
           try {
             opt.algo_regex.emplace_back(pat, std::regex::icase);
           } catch (const std::regex_error &) {
-            throw std::runtime_error(std::string("Invalid --algo-re regex: ") + pat);
+            throw std::runtime_error(std::string("Invalid --algo-re regex: ") +
+                                     pat);
           }
         }
-        if (pos == std::string::npos) break; else start = pos + 1;
+        if (pos == std::string::npos)
+          break;
+        else
+          start = pos + 1;
       }
     } else if (a == "--assert-sorted") {
       opt.assert_sorted = true;
@@ -471,116 +566,237 @@ static std::vector<T> make_data(std::size_t n, Dist dist, std::mt19937_64 &rng,
                                 int partial_pct, int dups_k) {
   std::vector<T> v;
   v.resize(n);
-  if (dist == Dist::random) {
-    if constexpr (std::is_integral_v<T>) {
-      std::uniform_int_distribution<std::make_unsigned_t<T>> d(0, std::numeric_limits<std::make_unsigned_t<T>>::max());
-      for (std::size_t i = 0; i < n; ++i)
-        v[i] = static_cast<T>(d(rng));
-    } else {
-      std::uniform_real_distribution<T> d(T(0), T(1));
-      for (std::size_t i = 0; i < n; ++i)
-        v[i] = d(rng);
-    }
-  } else if (dist == Dist::reverse) {
-    for (std::size_t i = 0; i < n; ++i)
-      v[i] = static_cast<T>(n - 1 - i);
-  } else if (dist == Dist::dups) {
-    int k = std::max(1, dups_k);
-    std::uniform_int_distribution<int> d(0, k - 1);
-    for (std::size_t i = 0; i < n; ++i)
-      v[i] = static_cast<T>(d(rng));
-  } else if (dist == Dist::sorted) {
-    for (std::size_t i = 0; i < n; ++i)
-      v[i] = static_cast<T>(i);
-  } else if (dist == Dist::saw) {
-    std::size_t period = std::max<std::size_t>(std::min<std::size_t>(n ? n : 1, 1024), 1);
-    for (std::size_t i = 0; i < n; ++i)
-      v[i] = static_cast<T>(i % period);
-  } else if (dist == Dist::runs) {
-    // Random values arranged into sorted runs of fixed length
-    const std::size_t run_len = std::max<std::size_t>(1, std::min<std::size_t>(n ? n : 1, 2048));
-    // fill random
-    if constexpr (std::is_integral_v<T>) {
-      std::uniform_int_distribution<std::make_unsigned_t<T>> d(0, std::numeric_limits<std::make_unsigned_t<T>>::max());
-      for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<T>(d(rng));
-    } else {
-      std::uniform_real_distribution<T> d(T(0), T(1));
-      for (std::size_t i = 0; i < n; ++i) v[i] = d(rng);
-    }
-    for (std::size_t i = 0; i < n; i += run_len) {
-      std::size_t r = std::min(run_len, n - i);
-      std::sort(v.begin() + static_cast<std::ptrdiff_t>(i), v.begin() + static_cast<std::ptrdiff_t>(i + r));
-    }
-  } else if (dist == Dist::gauss) {
-    if constexpr (std::is_integral_v<T>) {
-      using Lim = std::numeric_limits<T>;
-      std::normal_distribution<double> nd(0.0, 1.0);
-      const double minv = static_cast<double>(Lim::min());
-      const double maxv = static_cast<double>(Lim::max());
-      const double mean = std::is_signed_v<T> ? 0.0 : (maxv / 2.0);
-      const double stddev = (maxv - (std::is_signed_v<T> ? minv : 0.0)) / 8.0;
-      for (std::size_t i = 0; i < n; ++i) {
-        double x = mean + stddev * nd(rng);
-        if (x < minv) x = minv;
-        if (x > maxv) x = maxv;
-        v[i] = static_cast<T>(x);
+  if constexpr (std::is_same_v<T, std::string>) {
+    auto to_key = [](uint64_t x) {
+      // 12-char base-26 lowercase string for predictable lex order
+      std::string s(12, 'a');
+      for (int i = 11; i >= 0; --i) {
+        s[static_cast<std::size_t>(i)] = static_cast<char>('a' + (x % 26u));
+        x /= 26u;
       }
-    } else {
-      std::normal_distribution<T> nd(T(0), T(1));
-      for (std::size_t i = 0; i < n; ++i) v[i] = nd(rng);
-    }
-  } else if (dist == Dist::exp) {
-    std::exponential_distribution<double> ed(1.0);
-    if constexpr (std::is_integral_v<T>) {
-      using Lim = std::numeric_limits<T>;
-      const double minv = static_cast<double>(Lim::min());
-      const double maxv = static_cast<double>(Lim::max());
+      return s;
+    };
+    auto pad_num = [](uint64_t x) {
+      // zero-padded decimal for stable numeric-lex ordering
+      std::string s = std::to_string(x);
+      if (s.size() < 12)
+        s.insert(s.begin(), static_cast<std::string::size_type>(12 - s.size()),
+                 '0');
+      return s;
+    };
+    if (dist == Dist::random) {
+      std::uniform_int_distribution<uint64_t> d(0, UINT64_C(1'000'000'000'000));
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = to_key(d(rng));
+    } else if (dist == Dist::sorted) {
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = pad_num(i);
+    } else if (dist == Dist::reverse) {
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = pad_num(n - 1 - i);
+    } else if (dist == Dist::dups) {
+      int k = std::max(1, dups_k);
+      std::uniform_int_distribution<int> d(0, k - 1);
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = pad_num(static_cast<uint64_t>(d(rng)));
+    } else if (dist == Dist::partial) {
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = pad_num(i);
+      std::size_t to_shuffle =
+          (n * static_cast<std::size_t>(std::clamp(partial_pct, 0, 100))) / 100;
+      if (to_shuffle > n)
+        to_shuffle = n;
+      std::uniform_int_distribution<std::size_t> d(0, n ? n - 1 : 0);
+      for (std::size_t i = 0; i < to_shuffle; ++i) {
+        std::size_t a = d(rng), b = d(rng);
+        std::swap(v[a], v[b]);
+      }
+    } else if (dist == Dist::saw) {
+      std::size_t period =
+          std::max<std::size_t>(std::min<std::size_t>(n ? n : 1, 1024), 1);
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = pad_num(i % period);
+    } else if (dist == Dist::runs) {
+      std::uniform_int_distribution<uint64_t> d(0, UINT64_C(1'000'000'000'000));
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = to_key(d(rng));
+      const std::size_t run_len =
+          std::max<std::size_t>(1, std::min<std::size_t>(n ? n : 1, 2048));
+      for (std::size_t i = 0; i < n; i += run_len) {
+        std::size_t r = std::min(run_len, n - i);
+        std::sort(v.begin() + static_cast<std::ptrdiff_t>(i),
+                  v.begin() + static_cast<std::ptrdiff_t>(i + r));
+      }
+    } else if (dist == Dist::gauss) {
+      std::normal_distribution<double> nd(0.0, 1.0);
+      for (std::size_t i = 0; i < n; ++i) {
+        double x = nd(rng);
+        uint64_t k = static_cast<uint64_t>(std::llround((x + 4.0) * 1e10));
+        v[i] = to_key(k);
+      }
+    } else if (dist == Dist::exp) {
+      std::exponential_distribution<double> ed(1.0);
       for (std::size_t i = 0; i < n; ++i) {
         double x = ed(rng);
-        // scale into [0, maxv] or [minv, maxv] depending on signedness
-        if constexpr (std::is_signed_v<T>) {
-          double y = x; // positive skew
-          double s = (maxv - 0.0) / 8.0; // scale to reasonable range
-          y = 0.0 + s * y;
-          if (y > maxv) y = maxv;
-          v[i] = static_cast<T>(y);
-        } else {
-          double s = maxv / 8.0;
-          double y = s * x;
-          if (y > maxv) y = maxv;
-          v[i] = static_cast<T>(y);
-        }
+        uint64_t k = static_cast<uint64_t>(x * 1e10);
+        v[i] = to_key(k);
       }
-    } else {
-      for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<T>(ed(rng));
+    } else if (dist == Dist::zipf) {
+      int K = std::max(1, dups_k);
+      const double s = 1.2;
+      std::vector<double> cum(static_cast<std::size_t>(K));
+      double Z = 0.0;
+      for (int k = 1; k <= K; ++k)
+        Z += 1.0 / std::pow(static_cast<double>(k), s);
+      double run = 0.0;
+      for (int k = 1; k <= K; ++k) {
+        run += (1.0 / std::pow(static_cast<double>(k), s)) / Z;
+        cum[static_cast<std::size_t>(k - 1)] = run;
+      }
+      std::uniform_real_distribution<double> ud(0.0, 1.0);
+      for (std::size_t i = 0; i < n; ++i) {
+        double u = ud(rng);
+        auto it = std::lower_bound(cum.begin(), cum.end(), u);
+        int idx = static_cast<int>(std::distance(cum.begin(), it));
+        v[i] = pad_num(static_cast<uint64_t>(idx));
+      }
     }
-  } else if (dist == Dist::zipf) {
-    int K = std::max(1, dups_k);
-    const double s = 1.2; // skew parameter
-    std::vector<double> cum(static_cast<std::size_t>(K));
-    double Z = 0.0; for (int k = 1; k <= K; ++k) Z += 1.0 / std::pow(static_cast<double>(k), s);
-    double run = 0.0; for (int k = 1; k <= K; ++k) { run += (1.0 / std::pow(static_cast<double>(k), s)) / Z; cum[static_cast<std::size_t>(k-1)] = run; }
-    std::uniform_real_distribution<double> ud(0.0, 1.0);
-    for (std::size_t i = 0; i < n; ++i) {
-      double u = ud(rng);
-      auto it = std::lower_bound(cum.begin(), cum.end(), u);
-      int idx = static_cast<int>(std::distance(cum.begin(), it));
-      v[i] = static_cast<T>(idx);
-    }
-  } else { // partial
-    for (std::size_t i = 0; i < n; ++i)
-      v[i] = static_cast<T>(i);
-    // Shuffle a percentage of elements
-    std::size_t to_shuffle =
-        (n * static_cast<std::size_t>(std::clamp(partial_pct, 0, 100))) / 100;
-    if (to_shuffle > n)
-      to_shuffle = n;
-    // pick indices and swap randomly
-    std::uniform_int_distribution<std::size_t> d(0, n ? n - 1 : 0);
-    for (std::size_t i = 0; i < to_shuffle; ++i) {
-      std::size_t a = d(rng);
-      std::size_t b = d(rng);
-      std::swap(v[a], v[b]);
+    return v;
+  } else {
+    if (dist == Dist::random) {
+      if constexpr (std::is_integral_v<T>) {
+        std::uniform_int_distribution<std::make_unsigned_t<T>> d(
+            0, std::numeric_limits<std::make_unsigned_t<T>>::max());
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = static_cast<T>(d(rng));
+      } else if constexpr (std::is_floating_point_v<T>) {
+        std::uniform_real_distribution<T> d(T(0), T(1));
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = d(rng);
+      } else {
+        // Non-numeric types are handled above; leave default-initialized
+      }
+    } else if (dist == Dist::reverse) {
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = static_cast<T>(n - 1 - i);
+    } else if (dist == Dist::dups) {
+      int k = std::max(1, dups_k);
+      std::uniform_int_distribution<int> d(0, k - 1);
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = static_cast<T>(d(rng));
+    } else if (dist == Dist::sorted) {
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = static_cast<T>(i);
+    } else if (dist == Dist::saw) {
+      std::size_t period =
+          std::max<std::size_t>(std::min<std::size_t>(n ? n : 1, 1024), 1);
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = static_cast<T>(i % period);
+    } else if (dist == Dist::runs) {
+      // Random values arranged into sorted runs of fixed length
+      const std::size_t run_len =
+          std::max<std::size_t>(1, std::min<std::size_t>(n ? n : 1, 2048));
+      // fill random
+      if constexpr (std::is_integral_v<T>) {
+        std::uniform_int_distribution<std::make_unsigned_t<T>> d(
+            0, std::numeric_limits<std::make_unsigned_t<T>>::max());
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = static_cast<T>(d(rng));
+      } else if constexpr (std::is_floating_point_v<T>) {
+        std::uniform_real_distribution<T> d(T(0), T(1));
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = d(rng);
+      } else {
+        // Non-numeric handled above
+      }
+      for (std::size_t i = 0; i < n; i += run_len) {
+        std::size_t r = std::min(run_len, n - i);
+        std::sort(v.begin() + static_cast<std::ptrdiff_t>(i),
+                  v.begin() + static_cast<std::ptrdiff_t>(i + r));
+      }
+    } else if (dist == Dist::gauss) {
+      if constexpr (std::is_integral_v<T>) {
+        using Lim = std::numeric_limits<T>;
+        std::normal_distribution<double> nd(0.0, 1.0);
+        const double minv = static_cast<double>(Lim::min());
+        const double maxv = static_cast<double>(Lim::max());
+        const double mean = std::is_signed_v<T> ? 0.0 : (maxv / 2.0);
+        const double stddev = (maxv - (std::is_signed_v<T> ? minv : 0.0)) / 8.0;
+        for (std::size_t i = 0; i < n; ++i) {
+          double x = mean + stddev * nd(rng);
+          if (x < minv)
+            x = minv;
+          if (x > maxv)
+            x = maxv;
+          v[i] = static_cast<T>(x);
+        }
+      } else {
+        std::normal_distribution<T> nd(T(0), T(1));
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = nd(rng);
+      }
+    } else if (dist == Dist::exp) {
+      std::exponential_distribution<double> ed(1.0);
+      if constexpr (std::is_integral_v<T>) {
+        using Lim = std::numeric_limits<T>;
+        const double minv = static_cast<double>(Lim::min());
+        const double maxv = static_cast<double>(Lim::max());
+        for (std::size_t i = 0; i < n; ++i) {
+          double x = ed(rng);
+          // scale into [0, maxv] or [minv, maxv] depending on signedness
+          if constexpr (std::is_signed_v<T>) {
+            double y = x;                  // positive skew
+            double s = (maxv - 0.0) / 8.0; // scale to reasonable range
+            y = 0.0 + s * y;
+            if (y > maxv)
+              y = maxv;
+            v[i] = static_cast<T>(y);
+          } else {
+            double s = maxv / 8.0;
+            double y = s * x;
+            if (y > maxv)
+              y = maxv;
+            v[i] = static_cast<T>(y);
+          }
+        }
+      } else {
+        for (std::size_t i = 0; i < n; ++i)
+          v[i] = static_cast<T>(ed(rng));
+      }
+    } else if (dist == Dist::zipf) {
+      int K = std::max(1, dups_k);
+      const double s = 1.2; // skew parameter
+      std::vector<double> cum(static_cast<std::size_t>(K));
+      double Z = 0.0;
+      for (int k = 1; k <= K; ++k)
+        Z += 1.0 / std::pow(static_cast<double>(k), s);
+      double run = 0.0;
+      for (int k = 1; k <= K; ++k) {
+        run += (1.0 / std::pow(static_cast<double>(k), s)) / Z;
+        cum[static_cast<std::size_t>(k - 1)] = run;
+      }
+      std::uniform_real_distribution<double> ud(0.0, 1.0);
+      for (std::size_t i = 0; i < n; ++i) {
+        double u = ud(rng);
+        auto it = std::lower_bound(cum.begin(), cum.end(), u);
+        int idx = static_cast<int>(std::distance(cum.begin(), it));
+        v[i] = static_cast<T>(idx);
+      }
+    } else { // partial
+      for (std::size_t i = 0; i < n; ++i)
+        v[i] = static_cast<T>(i);
+      // Shuffle a percentage of elements
+      std::size_t to_shuffle =
+          (n * static_cast<std::size_t>(std::clamp(partial_pct, 0, 100))) / 100;
+      if (to_shuffle > n)
+        to_shuffle = n;
+      // pick indices and swap randomly
+      std::uniform_int_distribution<std::size_t> d(0, n ? n - 1 : 0);
+      for (std::size_t i = 0; i < to_shuffle; ++i) {
+        std::size_t a = d(rng);
+        std::size_t b = d(rng);
+        std::swap(v[a], v[b]);
+      }
     }
   }
   return v;
@@ -745,14 +961,12 @@ template <class T> inline void radix_sort_lsd(std::vector<T> &v) {
 } // namespace algos
 
 // Registry of algorithms (templated by element type)
-template <class T>
-struct AlgoT {
+template <class T> struct AlgoT {
   std::string name;
   std::function<void(std::vector<T> &)> run;
 };
 
-template <class T>
-static std::vector<AlgoT<T>> build_registry_t() {
+template <class T> static std::vector<AlgoT<T>> build_registry_t() {
   std::vector<AlgoT<T>> regs;
   regs.push_back({"std_sort", [](auto &v) { std::sort(v.begin(), v.end()); }});
   regs.push_back({"std_stable_sort",
@@ -774,7 +988,8 @@ static std::vector<AlgoT<T>> build_registry_t() {
   regs.push_back(
       {"quicksort_hybrid", [](auto &v) { algos::quicksort_hybrid(v); }});
   if constexpr (std::is_integral_v<T>) {
-    regs.push_back({"radix_sort_lsd", [](auto &v) { algos::radix_sort_lsd(v); }});
+    regs.push_back(
+        {"radix_sort_lsd", [](auto &v) { algos::radix_sort_lsd(v); }});
   }
 #if SORTBENCH_HAS_PDQ
   regs.push_back({"pdqsort", [](auto &v) { pdqsort(v.begin(), v.end()); }});
@@ -785,11 +1000,13 @@ static std::vector<AlgoT<T>> build_registry_t() {
     regs.push_back({"customv2", [](auto &v) { custom_algo::sort_int_v2(v); }});
   } else if constexpr (std::is_same_v<T, float>) {
     regs.push_back({"custom", [](auto &v) { custom_algo::sort_float(v); }});
-    regs.push_back({"customv2", [](auto &v) { custom_algo::sort_float_v2(v); }});
+    regs.push_back(
+        {"customv2", [](auto &v) { custom_algo::sort_float_v2(v); }});
   } else {
     // For other types, provide a safe fallback under the same name
     regs.push_back({"custom", [](auto &v) { std::sort(v.begin(), v.end()); }});
-    regs.push_back({"customv2", [](auto &v) { std::sort(v.begin(), v.end()); }});
+    regs.push_back(
+        {"customv2", [](auto &v) { std::sort(v.begin(), v.end()); }});
   }
 #endif
   return regs;
@@ -811,60 +1028,120 @@ static void load_plugins_t(const std::vector<std::string> &paths,
     }
     dlerror();
     // Prefer v2 multi-type interface
-    if (auto fn2 = reinterpret_cast<get_algos_v2_fn>(dlsym(h, "sortbench_get_algorithms_v2")); fn2 && !dlerror()) {
-      const sortbench_algo_v2 *arr = nullptr; int count = 0;
+    if (auto fn2 = reinterpret_cast<get_algos_v2_fn>(
+            dlsym(h, "sortbench_get_algorithms_v2"));
+        fn2 && !dlerror()) {
+      const sortbench_algo_v2 *arr = nullptr;
+      int count = 0;
       int ok = fn2(&arr, &count);
-      if (!ok || !arr || count <= 0) { dlclose(h); continue; }
+      if (!ok || !arr || count <= 0) {
+        dlclose(h);
+        continue;
+      }
       bool any_added = false;
       for (int i = 0; i < count; ++i) {
-        const auto &a = arr[i]; if (!a.name) continue; std::string nm = a.name;
+        const auto &a = arr[i];
+        if (!a.name)
+          continue;
+        std::string nm = a.name;
         // Select the appropriate function pointer for T
-        if constexpr (std::is_same_v<T,int>) {
-          if (!a.run_i32) continue; auto run = a.run_i32;
-          regs.push_back({nm, [run](std::vector<int> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        if constexpr (std::is_same_v<T, int>) {
+          if (!a.run_i32)
+            continue;
+          auto run = a.run_i32;
+          regs.push_back({nm, [run](std::vector<int> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
-        } else if constexpr (std::is_same_v<T,unsigned int>) {
-          if (!a.run_u32) continue; auto run = a.run_u32;
-          regs.push_back({nm, [run](std::vector<unsigned int> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        } else if constexpr (std::is_same_v<T, unsigned int>) {
+          if (!a.run_u32)
+            continue;
+          auto run = a.run_u32;
+          regs.push_back({nm, [run](std::vector<unsigned int> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
-        } else if constexpr (std::is_same_v<T,long long>) {
-          if (!a.run_i64) continue; auto run = a.run_i64;
-          regs.push_back({nm, [run](std::vector<long long> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        } else if constexpr (std::is_same_v<T, long long>) {
+          if (!a.run_i64)
+            continue;
+          auto run = a.run_i64;
+          regs.push_back({nm, [run](std::vector<long long> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
-        } else if constexpr (std::is_same_v<T,unsigned long long>) {
-          if (!a.run_u64) continue; auto run = a.run_u64;
-          regs.push_back({nm, [run](std::vector<unsigned long long> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        } else if constexpr (std::is_same_v<T, unsigned long long>) {
+          if (!a.run_u64)
+            continue;
+          auto run = a.run_u64;
+          regs.push_back({nm, [run](std::vector<unsigned long long> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
-        } else if constexpr (std::is_same_v<T,float>) {
-          if (!a.run_f32) continue; auto run = a.run_f32;
-          regs.push_back({nm, [run](std::vector<float> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        } else if constexpr (std::is_same_v<T, float>) {
+          if (!a.run_f32)
+            continue;
+          auto run = a.run_f32;
+          regs.push_back({nm, [run](std::vector<float> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
-        } else if constexpr (std::is_same_v<T,double>) {
-          if (!a.run_f64) continue; auto run = a.run_f64;
-          regs.push_back({nm, [run](std::vector<double> &v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        } else if constexpr (std::is_same_v<T, double>) {
+          if (!a.run_f64)
+            continue;
+          auto run = a.run_f64;
+          regs.push_back({nm, [run](std::vector<double> &v) {
+                            if (!v.empty())
+                              run(v.data(), (int)v.size());
+                          }});
           any_added = true;
         }
       }
-      if (any_added) { handles.push_back(h); continue; }
+      if (any_added) {
+        handles.push_back(h);
+        continue;
+      }
       // If no algorithms for this T, close handle and continue
       dlclose(h);
       continue;
     }
     // Fallback to v1 (int-only)
-    auto fn1 = reinterpret_cast<get_algos_v1_fn>(dlsym(h, "sortbench_get_algorithms_v1"));
-    if (!fn1 || dlerror()) { dlclose(h); continue; }
-    const sortbench_algo_v1 *arr = nullptr; int count = 0;
+    auto fn1 = reinterpret_cast<get_algos_v1_fn>(
+        dlsym(h, "sortbench_get_algorithms_v1"));
+    if (!fn1 || dlerror()) {
+      dlclose(h);
+      continue;
+    }
+    const sortbench_algo_v1 *arr = nullptr;
+    int count = 0;
     int ok = fn1(&arr, &count);
-    if (!ok || !arr || count <= 0) { dlclose(h); continue; }
+    if (!ok || !arr || count <= 0) {
+      dlclose(h);
+      continue;
+    }
     bool any_added = false;
-    if constexpr (std::is_same_v<T,int>) {
+    if constexpr (std::is_same_v<T, int>) {
       for (int i = 0; i < count; ++i) {
-        const auto &a = arr[i]; if (!a.name || !a.run_int) continue; std::string nm = a.name;
-        regs.push_back({nm, [run=a.run_int](std::vector<int>& v){ if (!v.empty()) run(v.data(), (int)v.size()); }});
+        const auto &a = arr[i];
+        if (!a.name || !a.run_int)
+          continue;
+        std::string nm = a.name;
+        regs.push_back({nm, [run = a.run_int](std::vector<int> &v) {
+                          if (!v.empty())
+                            run(v.data(), (int)v.size());
+                        }});
         any_added = true;
       }
     }
-    if (any_added) { handles.push_back(h); } else { dlclose(h); }
+    if (any_added) {
+      handles.push_back(h);
+    } else {
+      dlclose(h);
+    }
   }
 }
 
@@ -886,10 +1163,9 @@ static bool name_selected(const std::vector<std::string> &selected,
 
 template <class T>
 static double benchmark_once_t(const std::function<void(std::vector<T> &)> &fn,
-                             const std::vector<T> &original,
-                             std::vector<T> &work,
-                             bool check_sorted = false,
-                             const char* algo_name = nullptr) {
+                               const std::vector<T> &original,
+                               std::vector<T> &work, bool check_sorted = false,
+                               const char *algo_name = nullptr) {
   // Reuse allocated buffer and copy data efficiently
   work.resize(original.size());
   std::copy(original.begin(), original.end(), work.begin());
@@ -899,7 +1175,8 @@ static double benchmark_once_t(const std::function<void(std::vector<T> &)> &fn,
   if (check_sorted) {
     if (!std::is_sorted(work.begin(), work.end())) {
       std::cerr << "Assertion failed: output not sorted";
-      if (algo_name) std::cerr << " (algo=" << algo_name << ")";
+      if (algo_name)
+        std::cerr << " (algo=" << algo_name << ")";
       std::cerr << ", N=" << work.size() << "\n";
       std::exit(4);
     }
@@ -944,17 +1221,31 @@ static bool has_ext(const std::string &path, const char *ext1,
 static int write_gnuplot_and_run(
     const std::string &out_path, int W, int H, const std::string &title,
     const std::vector<std::tuple<std::string, double, double, double>> &series,
-    bool keep_files, PlotStyle style) {
+    bool keep_files, PlotStyle style,
+    const std::optional<std::string> &artifact_dir_opt) {
   // Use temporary files in the system temp directory
   namespace fs = std::filesystem;
-  fs::path tmpdir = fs::temp_directory_path();
-  auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-  std::string base = std::string("sortbench_") + std::to_string(now);
-  std::string dat = (tmpdir / (base + ".dat")).string();
-  std::string gp = (tmpdir / (base + ".gp")).string();
-  std::ofstream df(dat);
+  fs::path dat_path;
+  fs::path gp_path;
+  if (artifact_dir_opt.has_value()) {
+    fs::path outp(out_path);
+    fs::path dir(*artifact_dir_opt);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::string stem = outp.stem().string();
+    dat_path = dir / (stem + ".dat");
+    gp_path = dir / (stem + ".gp");
+  } else {
+    fs::path tmpdir = fs::temp_directory_path();
+    auto now =
+        std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::string base = std::string("sortbench_") + std::to_string(now);
+    dat_path = tmpdir / (base + ".dat");
+    gp_path = tmpdir / (base + ".gp");
+  }
+  std::ofstream df(dat_path);
   if (!df) {
-    std::cerr << "Failed to open data file: " << dat << "\n";
+    std::cerr << "Failed to open data file: " << dat_path << "\n";
     return -1;
   }
   df << "# algo\tmedian\tmin\tmax\n";
@@ -964,9 +1255,9 @@ static int write_gnuplot_and_run(
   }
   df.close();
 
-  std::ofstream gf(gp);
+  std::ofstream gf(gp_path);
   if (!gf) {
-    std::cerr << "Failed to open gnuplot file: " << gp << "\n";
+    std::cerr << "Failed to open gnuplot file: " << gp_path << "\n";
     return -1;
   }
   std::string term;
@@ -987,32 +1278,40 @@ static int write_gnuplot_and_run(
     gf << "set style data histogram\n";
     gf << "set style fill solid 1.0 border -1\n";
     gf << "set boxwidth 0.6\n";
-    gf << "plot '" << dat << "' using 2:xtic(1) title 'median' with boxes, "
+    gf << "plot '" << dat_path.string()
+       << "' using 2:xtic(1) title 'median' with boxes, "
        << "     '' using 0:2:3:4 with yerrorbars notitle\n";
   } else {
-    gf << "plot '" << dat << "' using 0:2:xtic(1) title 'median' with linespoints, "
+    gf << "plot '" << dat_path.string()
+       << "' using 0:2:xtic(1) title 'median' with linespoints, "
        << "     '' using 0:2:3:4 with yerrorbars notitle\n";
   }
   gf.close();
 
-  std::string cmd = "gnuplot '" + gp + "'";
+  std::string cmd = std::string("gnuplot '") + gp_path.string() + "'";
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     std::cerr << "gnuplot failed (rc=" << rc
-              << ") — ensure gnuplot is installed. Script: " << gp << "\n";
+              << ") — ensure gnuplot is installed. Script: " << gp_path
+              << "\n";
   }
   if (!keep_files) {
     std::error_code ec;
-    fs::remove(dat, ec);
-    fs::remove(gp, ec);
+    fs::remove(dat_path, ec);
+    fs::remove(gp_path, ec);
   }
   return rc;
 }
 
-static bool write_plot_dat_file(const std::string &dat_path,
-    const std::vector<std::tuple<std::string, double, double, double>> &series) {
+static bool write_plot_dat_file(
+    const std::string &dat_path,
+    const std::vector<std::tuple<std::string, double, double, double>>
+        &series) {
   std::ofstream df(dat_path);
-  if (!df) { std::cerr << "Failed to open data file: " << dat_path << "\n"; return false; }
+  if (!df) {
+    std::cerr << "Failed to open data file: " << dat_path << "\n";
+    return false;
+  }
   df << "# algo\tmedian\tmin\tmax\n";
   for (const auto &t : series) {
     df << std::get<0>(t) << '\t' << std::get<1>(t) << '\t' << std::get<2>(t)
@@ -1021,8 +1320,7 @@ static bool write_plot_dat_file(const std::string &dat_path,
   return true;
 }
 
-template <class T>
-static int run_for_type(const Options& opt_base) {
+template <class T> static int run_for_type(const Options &opt_base) {
   Options opt = opt_base;
   // Configure thread limits if requested
   if (opt.threads > 0) {
@@ -1040,86 +1338,138 @@ static int run_for_type(const Options& opt_base) {
 #endif
   auto regs = build_registry_t<T>();
   std::vector<PluginHandle> plugin_handles;
-  if (!opt.plugin_paths.empty()) load_plugins_t<T>(opt.plugin_paths, regs, plugin_handles);
+  if (!opt.plugin_paths.empty())
+    load_plugins_t<T>(opt.plugin_paths, regs, plugin_handles);
   if (opt.list) {
-    for (const auto &algo : regs) { std::cout << algo.name << "\n"; }
+    for (const auto &algo : regs) {
+      std::cout << algo.name << "\n";
+    }
     return 0;
   }
 
   std::mt19937_64 rng(opt.seed.value_or(default_seed()));
-  std::vector<T> original = make_data<T>(opt.N, opt.dist, rng, opt.partial_shuffle_pct, opt.dup_values);
+  std::vector<T> original = make_data<T>(
+      opt.N, opt.dist, rng, opt.partial_shuffle_pct, opt.dup_values);
   std::vector<T> work;
 
   if (opt.verify) {
-    auto ref = original; std::sort(ref.begin(), ref.end());
+    auto ref = original;
+    std::sort(ref.begin(), ref.end());
     for (const auto &algo : regs) {
-    if (!name_selected(opt.algos, opt.algo_regex, algo.name)) continue;
-      work = original; algo.run(work);
-      if (!std::is_sorted(work.begin(), work.end())) { std::cerr << "Verification failed (not sorted): " << algo.name << "\n"; return 3; }
-      if (work != ref) { std::cerr << "Verification mismatch vs std::sort: " << algo.name << "\n"; return 3; }
+      if (!name_selected(opt.algos, opt.algo_regex, algo.name))
+        continue;
+      work = original;
+      algo.run(work);
+      if (!std::is_sorted(work.begin(), work.end())) {
+        std::cerr << "Verification failed (not sorted): " << algo.name << "\n";
+        return 3;
+      }
+      if (work != ref) {
+        std::cerr << "Verification mismatch vs std::sort: " << algo.name
+                  << "\n";
+        return 3;
+      }
     }
   }
 
   struct Row {
-    std::string algo; std::size_t N; std::string dist;
-    double t;    // median ms
-    double tmin; double tmax; // min/max ms
-    double tmean; double tstd; // mean/stddev ms
+    std::string algo;
+    std::size_t N;
+    std::string dist;
+    double t; // median ms
+    double tmin;
+    double tmax; // min/max ms
+    double tmean;
+    double tstd; // mean/stddev ms
   };
-  std::vector<Row> rows; rows.reserve(regs.size());
+  std::vector<Row> rows;
+  rows.reserve(regs.size());
   for (const auto &algo : regs) {
-    if (!name_selected(opt.algos, opt.algo_regex, algo.name)) continue;
+    if (!name_selected(opt.algos, opt.algo_regex, algo.name))
+      continue;
 #if !SORTBENCH_HAS_PDQ
-    if (algo.name == "pdqsort") { std::cerr << "pdqsort requested but header not found; skipping.\n"; continue; }
+    if (algo.name == "pdqsort") {
+      std::cerr << "pdqsort requested but header not found; skipping.\n";
+      continue;
+    }
 #endif
     // Warm-up runs (not included in timing stats)
     for (int w = 0; w < opt.warmup; ++w) {
-      (void)benchmark_once_t<T>(algo.run, original, work, opt.assert_sorted, algo.name.c_str());
+      (void)benchmark_once_t<T>(algo.run, original, work, opt.assert_sorted,
+                                algo.name.c_str());
     }
-    std::vector<double> times; times.reserve(static_cast<std::size_t>(opt.repeats));
-    for (int rep = 0; rep < opt.repeats; ++rep) times.push_back(benchmark_once_t<T>(algo.run, original, work, opt.assert_sorted, algo.name.c_str()));
+    std::vector<double> times;
+    times.reserve(static_cast<std::size_t>(opt.repeats));
+    for (int rep = 0; rep < opt.repeats; ++rep)
+      times.push_back(benchmark_once_t<T>(
+          algo.run, original, work, opt.assert_sorted, algo.name.c_str()));
     double med = median(times);
     auto mm = std::minmax_element(times.begin(), times.end());
     double tmin = (mm.first != times.end() ? *mm.first : med);
     double tmax = (mm.second != times.end() ? *mm.second : med);
     // mean and stddev
-    double sum = 0.0; for (double x : times) sum += x;
-    double mean = (times.empty() ? med : sum / static_cast<double>(times.size()));
-    double var = 0.0; if (times.size() >= 2) {
-      for (double x : times) { double d = x - mean; var += d*d; }
-      var /= static_cast<double>(times.size()); // population stddev (timing stability)
+    double sum = 0.0;
+    for (double x : times)
+      sum += x;
+    double mean =
+        (times.empty() ? med : sum / static_cast<double>(times.size()));
+    double var = 0.0;
+    if (times.size() >= 2) {
+      for (double x : times) {
+        double d = x - mean;
+        var += d * d;
+      }
+      var /= static_cast<double>(
+          times.size()); // population stddev (timing stability)
     }
     double sdev = (times.size() >= 2 ? std::sqrt(var) : 0.0);
-    rows.push_back(Row{algo.name, opt.N, std::string(kDistNames[static_cast<int>(opt.dist)]), med, tmin, tmax, mean, sdev});
+    rows.push_back(Row{algo.name, opt.N,
+                       std::string(kDistNames[static_cast<int>(opt.dist)]), med,
+                       tmin, tmax, mean, sdev});
   }
 
   if (opt.format == OutFmt::csv) {
-    auto write_csv = [&](std::ostream& os, bool with_header){
-      if (with_header) os << "algo,N,dist,median_ms,mean_ms,min_ms,max_ms,stddev_ms\n";
+    auto write_csv = [&](std::ostream &os, bool with_header) {
+      if (with_header)
+        os << "algo,N,dist,median_ms,mean_ms,min_ms,max_ms,stddev_ms\n";
       for (const auto &r : rows) {
-        os << r.algo << ',' << r.N << ',' << r.dist << ','
-           << std::fixed << std::setprecision(3)
-           << r.t << ',' << r.tmean << ',' << r.tmin << ',' << r.tmax << ',' << r.tstd
-           << "\n";
+        os << r.algo << ',' << r.N << ',' << r.dist << ',' << std::fixed
+           << std::setprecision(3) << r.t << ',' << r.tmean << ',' << r.tmin
+           << ',' << r.tmax << ',' << r.tstd << "\n";
       }
     };
     write_csv(std::cout, opt.csv_header);
-    // Write to results file
-    namespace fs = std::filesystem;
-    fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                               : fs::path("bench_result.csv");
-    std::ios_base::openmode mode = opt.csv_header ? std::ios::out : (std::ios::out | std::ios::app);
-    {
-      std::ofstream rf(rp, mode);
-      if (!rf) {
-        std::cerr << "Failed to open results file: " << rp << "\n";
-      } else {
-        write_csv(rf, opt.csv_header);
+    // Write to results file (unless suppressed)
+    if (!opt.no_file) {
+      namespace fs = std::filesystem;
+      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
+                                                 : fs::path("bench_result.csv");
+      std::error_code ec;
+      if (rp.has_parent_path())
+        fs::create_directories(rp.parent_path(), ec);
+      std::ios_base::openmode mode =
+          opt.csv_header ? std::ios::out : (std::ios::out | std::ios::app);
+      {
+        std::ofstream rf(rp, mode);
+        if (!rf) {
+          std::cerr << "Failed to open results file: " << rp << "\n";
+        } else {
+          write_csv(rf, opt.csv_header);
+        }
       }
     }
-    // If plotting is requested and format is CSV, also write a CSV file next to plot
-    if (opt.plot_path.has_value()) {
-      fs::path csvp(*opt.plot_path);
+    // If plotting is requested and format is CSV, also write a CSV file next to
+    // plot
+    if (opt.plot_path.has_value() && !opt.no_file) {
+      namespace fs = std::filesystem;
+      fs::path csvp = opt.output_dir.has_value()
+                          ? (fs::path(*opt.output_dir) /
+                             fs::path(*opt.plot_path).filename())
+                          : fs::path(*opt.plot_path);
+      if (opt.output_dir.has_value()) {
+        std::error_code ec;
+        fs::create_directories(fs::path(*opt.output_dir), ec);
+      }
       csvp.replace_extension(".csv");
       std::ofstream cf(csvp);
       if (!cf) {
@@ -1129,23 +1479,34 @@ static int run_for_type(const Options& opt_base) {
       }
     }
   } else if (opt.format == OutFmt::json) {
-    auto esc = [](const std::string &s){
-      std::string o; o.reserve(s.size()+8);
+    auto esc = [](const std::string &s) {
+      std::string o;
+      o.reserve(s.size() + 8);
       for (char c : s) {
         switch (c) {
-          case '"': o += "\\\""; break;
-          case '\\': o += "\\\\"; break;
-          case '\n': o += "\\n"; break;
-          case '\r': o += "\\r"; break;
-          case '\t': o += "\\t"; break;
-          default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-              char buf[7];
-              std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
-              o += buf;
-            } else {
-              o += c;
-            }
+        case '"':
+          o += "\\\"";
+          break;
+        case '\\':
+          o += "\\\\";
+          break;
+        case '\n':
+          o += "\\n";
+          break;
+        case '\r':
+          o += "\\r";
+          break;
+        case '\t':
+          o += "\\t";
+          break;
+        default:
+          if (static_cast<unsigned char>(c) < 0x20) {
+            char buf[7];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
+            o += buf;
+          } else {
+            o += c;
+          }
         }
       }
       return o;
@@ -1163,69 +1524,88 @@ static int run_for_type(const Options& opt_base) {
       js << "\"min_ms\":" << r.tmin << ",";
       js << "\"max_ms\":" << r.tmax << ",";
       js << "\"stddev_ms\":" << r.tstd << "}";
-      if (i + 1 != rows.size()) js << ",";
+      if (i + 1 != rows.size())
+        js << ",";
       js << "\n";
     }
     js << "]\n";
     std::cout << js.str();
     // Write JSON file (overwrite per run)
-    namespace fs = std::filesystem;
-    fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                               : fs::path("bench_result.json");
-    std::ofstream rf(rp);
-    if (!rf) {
-      std::cerr << "Failed to open results file: " << rp << "\n";
-    } else {
-      rf << js.str();
+    if (!opt.no_file) {
+      namespace fs = std::filesystem;
+      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
+                                                 : fs::path("bench_result.json");
+      std::error_code ec;
+      if (rp.has_parent_path())
+        fs::create_directories(rp.parent_path(), ec);
+      std::ofstream rf(rp);
+      if (!rf) {
+        std::cerr << "Failed to open results file: " << rp << "\n";
+      } else {
+        rf << js.str();
+      }
     }
   } else if (opt.format == OutFmt::jsonl) {
-    auto esc = [](const std::string &s){
-      std::string o; o.reserve(s.size()+8);
+    auto esc = [](const std::string &s) {
+      std::string o;
+      o.reserve(s.size() + 8);
       for (char c : s) {
         switch (c) {
-          case '"': o += "\\\""; break;
-          case '\\': o += "\\\\"; break;
-          case '\n': o += "\\n"; break;
-          case '\r': o += "\\r"; break;
-          case '\t': o += "\\t"; break;
-          default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-              char buf[7];
-              std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
-              o += buf;
-            } else {
-              o += c;
-            }
+        case '"':
+          o += "\\\"";
+          break;
+        case '\\':
+          o += "\\\\";
+          break;
+        case '\n':
+          o += "\\n";
+          break;
+        case '\r':
+          o += "\\r";
+          break;
+        case '\t':
+          o += "\\t";
+          break;
+        default:
+          if (static_cast<unsigned char>(c) < 0x20) {
+            char buf[7];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
+            o += buf;
+          } else {
+            o += c;
+          }
         }
       }
       return o;
     };
-    auto write_jsonl = [&](std::ostream& os){
+    auto write_jsonl = [&](std::ostream &os) {
       for (const auto &r : rows) {
-        os << '{'
-           << "\"algo\":\"" << esc(r.algo) << "\","
+        os << '{' << "\"algo\":\"" << esc(r.algo) << "\","
            << "\"N\":" << r.N << ","
-           << "\"dist\":\"" << esc(r.dist) << "\","
-           << std::fixed << std::setprecision(3)
-           << "\"median_ms\":" << r.t << ","
+           << "\"dist\":\"" << esc(r.dist) << "\"," << std::fixed
+           << std::setprecision(3) << "\"median_ms\":" << r.t << ","
            << "\"mean_ms\":" << r.tmean << ","
            << "\"min_ms\":" << r.tmin << ","
            << "\"max_ms\":" << r.tmax << ","
-           << "\"stddev_ms\":" << r.tstd
-           << "}" << '\n';
+           << "\"stddev_ms\":" << r.tstd << "}" << '\n';
       }
     };
     // stdout
     write_jsonl(std::cout);
     // append to file
-    namespace fs = std::filesystem;
-    fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                               : fs::path("bench_result.jsonl");
-    std::ofstream rf(rp, std::ios::out | std::ios::app);
-    if (!rf) {
-      std::cerr << "Failed to open results file: " << rp << "\n";
-    } else {
-      write_jsonl(rf);
+    if (!opt.no_file) {
+      namespace fs = std::filesystem;
+      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
+                                                 : fs::path("bench_result.jsonl");
+      std::error_code ec;
+      if (rp.has_parent_path())
+        fs::create_directories(rp.parent_path(), ec);
+      std::ofstream rf(rp, std::ios::out | std::ios::app);
+      if (!rf) {
+        std::cerr << "Failed to open results file: " << rp << "\n";
+      } else {
+        write_jsonl(rf);
+      }
     }
   } else {
     std::size_t w_algo = std::string("algo").size();
@@ -1240,27 +1620,29 @@ static int run_for_type(const Options& opt_base) {
       w_algo = std::max(w_algo, r.algo.size());
       w_N = std::max(w_N, std::to_string(r.N).size());
       w_dist = std::max(w_dist, r.dist.size());
-      auto widen = [](double v){ std::ostringstream os; os<<std::fixed<<std::setprecision(3)<<v; return os.str().size(); };
+      auto widen = [](double v) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(3) << v;
+        return os.str().size();
+      };
       w_med = std::max<std::size_t>(w_med, widen(r.t));
       w_mean = std::max<std::size_t>(w_mean, widen(r.tmean));
       w_min = std::max<std::size_t>(w_min, widen(r.tmin));
       w_max = std::max<std::size_t>(w_max, widen(r.tmax));
       w_std = std::max<std::size_t>(w_std, widen(r.tstd));
     }
-    auto print_table_to = [&](std::ostream& os){
+    auto print_table_to = [&](std::ostream &os) {
       auto print_sep = [&]() {
-        os << '+' << std::string(w_algo+2,'-')
-           << '+' << std::string(w_N+2,'-')
-           << '+' << std::string(w_dist+2,'-')
-           << '+' << std::string(w_med+2,'-')
-           << '+' << std::string(w_mean+2,'-')
-           << '+' << std::string(w_min+2,'-')
-           << '+' << std::string(w_max+2,'-')
-           << '+' << std::string(w_std+2,'-')
-           << "+\n";
+        os << '+' << std::string(w_algo + 2, '-') << '+'
+           << std::string(w_N + 2, '-') << '+' << std::string(w_dist + 2, '-')
+           << '+' << std::string(w_med + 2, '-') << '+'
+           << std::string(w_mean + 2, '-') << '+' << std::string(w_min + 2, '-')
+           << '+' << std::string(w_max + 2, '-') << '+'
+           << std::string(w_std + 2, '-') << "+\n";
       };
-      auto print_row = [&](std::string a,std::string n,std::string d,
-                           std::string med,std::string mean,std::string mn,std::string mx,std::string sd){
+      auto print_row = [&](std::string a, std::string n, std::string d,
+                           std::string med, std::string mean, std::string mn,
+                           std::string mx, std::string sd) {
         os << "| " << std::left << std::setw(static_cast<int>(w_algo)) << a
            << " | " << std::right << std::setw(static_cast<int>(w_N)) << n
            << " | " << std::left << std::setw(static_cast<int>(w_dist)) << d
@@ -1273,41 +1655,66 @@ static int run_for_type(const Options& opt_base) {
       };
       if (opt.csv_header) {
         print_sep();
-        print_row("algo","N","dist","median_ms","mean_ms","min_ms","max_ms","stddev_ms");
+        print_row("algo", "N", "dist", "median_ms", "mean_ms", "min_ms",
+                  "max_ms", "stddev_ms");
         print_sep();
       }
-      auto fmt = [](double v){ std::ostringstream os; os<<std::fixed<<std::setprecision(3)<<v; return os.str(); };
+      auto fmt = [](double v) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(3) << v;
+        return os.str();
+      };
       for (const auto &r : rows) {
-        print_row(r.algo, std::to_string(r.N), r.dist,
-                  fmt(r.t), fmt(r.tmean), fmt(r.tmin), fmt(r.tmax), fmt(r.tstd));
+        print_row(r.algo, std::to_string(r.N), r.dist, fmt(r.t), fmt(r.tmean),
+                  fmt(r.tmin), fmt(r.tmax), fmt(r.tstd));
       }
-      if (opt.csv_header) print_sep();
+      if (opt.csv_header)
+        print_sep();
     };
     print_table_to(std::cout);
     // Write table to file (overwrite per run)
-    namespace fs = std::filesystem;
-    fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                               : fs::path("bench_result.txt");
-    std::ofstream rf(rp);
-    if (!rf) {
-      std::cerr << "Failed to open results file: " << rp << "\n";
-    } else {
-      print_table_to(rf);
+    if (!opt.no_file) {
+      namespace fs = std::filesystem;
+      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
+                                                 : fs::path("bench_result.txt");
+      std::error_code ec;
+      if (rp.has_parent_path())
+        fs::create_directories(rp.parent_path(), ec);
+      std::ofstream rf(rp);
+      if (!rf) {
+        std::cerr << "Failed to open results file: " << rp << "\n";
+      } else {
+        print_table_to(rf);
+      }
     }
   }
 
   if (opt.plot_path.has_value()) {
-    std::vector<std::tuple<std::string,double,double,double>> series; series.reserve(rows.size());
-    for (const auto &r : rows) series.emplace_back(r.algo, r.t, r.tmin, r.tmax);
+    std::vector<std::tuple<std::string, double, double, double>> series;
+    series.reserve(rows.size());
+    for (const auto &r : rows)
+      series.emplace_back(r.algo, r.t, r.tmin, r.tmax);
     if (opt.multi_plot_accumulate && opt.plot_dat_path.has_value()) {
       write_plot_dat_file(*opt.plot_dat_path, series);
     } else {
-      std::string title = opt.plot_title.empty() ? (std::string("N=") + std::to_string(opt.N) + ", dist=" + std::string(kDistNames[static_cast<int>(opt.dist)]) + ", type=" + std::string(elem_type_name(opt.type))) : opt.plot_title;
-      write_gnuplot_and_run(*opt.plot_path, opt.plot_w, opt.plot_h, title, series, opt.keep_plot_artifacts, opt.plot_style);
+      std::string title =
+          opt.plot_title.empty()
+              ? (std::string("N=") + std::to_string(opt.N) + ", dist=" +
+                 std::string(kDistNames[static_cast<int>(opt.dist)]) +
+                 ", type=" + std::string(elem_type_name(opt.type)))
+              : opt.plot_title;
+      write_gnuplot_and_run(*opt.plot_path, opt.plot_w, opt.plot_h, title,
+                            series, opt.keep_plot_artifacts, opt.plot_style,
+                            opt.output_dir);
     }
   }
 
-  if constexpr (std::is_same_v<T,int>) { for (void* h : plugin_handles) { if (h) dlclose(h); } }
+  if constexpr (std::is_same_v<T, int>) {
+    for (void *h : plugin_handles) {
+      if (h)
+        dlclose(h);
+    }
+  }
   return 0;
 }
 
@@ -1362,8 +1769,10 @@ int main(int argc, char **argv) {
     if (opt.init_plugin_out.has_value()) {
       namespace fs = std::filesystem;
       fs::path outp(*opt.init_plugin_out);
-      if (!outp.has_extension()) outp.replace_extension(".cpp");
-      if (!outp.has_parent_path()) outp = fs::path("plugins") / outp;
+      if (!outp.has_extension())
+        outp.replace_extension(".cpp");
+      if (!outp.has_parent_path())
+        outp = fs::path("plugins") / outp;
       std::error_code ec;
       fs::create_directories(outp.parent_path(), ec);
       if (fs::exists(outp)) {
@@ -1382,19 +1791,28 @@ int main(int argc, char **argv) {
       else
         include_line = "#include \"sortbench_plugin.h\"\n";
       of << "// Generated by sortbench --init-plugin (v2 multi-type scaffold)\n"
-         << "#include <algorithm>\n#include <vector>\n" << include_line << "\n"
+         << "#include <algorithm>\n#include <vector>\n"
+         << include_line << "\n"
          << "// Provide one or more type-specific entrypoints.\n"
          << "// Return algorithms via sortbench_get_algorithms_v2.\n\n"
-         << "static void my_sort_i32(int* data, int n) { std::sort(data, data+n); }\n"
-         << "static void my_sort_u32(unsigned int* data, int n) { std::sort(data, data+n); }\n"
-         << "static void my_sort_i64(long long* data, int n) { std::sort(data, data+n); }\n"
-         << "static void my_sort_u64(unsigned long long* data, int n) { std::sort(data, data+n); }\n"
-         << "static void my_sort_f32(float* data, int n) { std::sort(data, data+n); }\n"
-         << "static void my_sort_f64(double* data, int n) { std::sort(data, data+n); }\n\n"
+         << "static void my_sort_i32(int* data, int n) { std::sort(data, "
+            "data+n); }\n"
+         << "static void my_sort_u32(unsigned int* data, int n) { "
+            "std::sort(data, data+n); }\n"
+         << "static void my_sort_i64(long long* data, int n) { std::sort(data, "
+            "data+n); }\n"
+         << "static void my_sort_u64(unsigned long long* data, int n) { "
+            "std::sort(data, data+n); }\n"
+         << "static void my_sort_f32(float* data, int n) { std::sort(data, "
+            "data+n); }\n"
+         << "static void my_sort_f64(double* data, int n) { std::sort(data, "
+            "data+n); }\n\n"
          << "static const sortbench_algo_v2 k_algos[] = {\n"
-         << "    {\"my_sort\", &my_sort_i32, &my_sort_u32, &my_sort_i64, &my_sort_u64, &my_sort_f32, &my_sort_f64},\n"
+         << "    {\"my_sort\", &my_sort_i32, &my_sort_u32, &my_sort_i64, "
+            "&my_sort_u64, &my_sort_f32, &my_sort_f64},\n"
          << "};\n\n"
-         << "extern \"C\" int sortbench_get_algorithms_v2(const sortbench_algo_v2** out_algos, int* out_count) {\n"
+         << "extern \"C\" int sortbench_get_algorithms_v2(const "
+            "sortbench_algo_v2** out_algos, int* out_count) {\n"
          << "    if (!out_algos || !out_count) return 0;\n"
          << "    *out_algos = k_algos;\n"
          << "    *out_count = (int)(sizeof(k_algos)/sizeof(k_algos[0]));\n"
@@ -1404,55 +1822,101 @@ int main(int argc, char **argv) {
          << "static const sortbench_algo_v1 k_algos_v1[] = {\n"
          << "    {\"my_sort\", &my_sort_i32},\n"
          << "};\n"
-         << "extern \"C\" int sortbench_get_algorithms_v1(const sortbench_algo_v1** out_algos, int* out_count) {\n"
+         << "extern \"C\" int sortbench_get_algorithms_v1(const "
+            "sortbench_algo_v1** out_algos, int* out_count) {\n"
          << "    if (!out_algos || !out_count) return 0;\n"
          << "    *out_algos = k_algos_v1;\n"
-         << "    *out_count = (int)(sizeof(k_algos_v1)/sizeof(k_algos_v1[0]));\n"
+         << "    *out_count = "
+            "(int)(sizeof(k_algos_v1)/sizeof(k_algos_v1[0]));\n"
          << "    return 1;\n"
          << "}\n";
       of.close();
       std::cout << "Wrote plugin scaffold: " << outp << "\n"
-                << "Build it via: ./sortbench --build-plugin " << outp.string() << " --out "
-                << (outp.parent_path() / (outp.stem().string() + std::string(".so"))).string() << "\n";
+                << "Build it via: ./sortbench --build-plugin " << outp.string()
+                << " --out "
+                << (outp.parent_path() /
+                    (outp.stem().string() + std::string(".so")))
+                       .string()
+                << "\n";
       return 0;
     }
     // Sweep over N values and one or more distributions
     std::vector<std::size_t> sweep = opt.Ns;
-    if (sweep.empty()) sweep.push_back(opt.N);
-    if (opt.dists.empty()) opt.dists.push_back(opt.dist);
+    if (sweep.empty())
+      sweep.push_back(opt.N);
+    if (opt.dists.empty())
+      opt.dists.push_back(opt.dist);
     bool first = true;
     int rc = 0;
     // Multiplot across distributions (single image)
     bool do_multi_plot = opt.plot_path.has_value() && opt.dists.size() > 1;
-    std::vector<std::pair<std::string,std::string>> plot_parts; // dist name -> dat path
+    std::vector<std::pair<std::string, std::string>>
+        plot_parts; // dist name -> dat path
     for (std::size_t nval : sweep) {
       for (Dist d : opt.dists) {
         Options cur = opt;
         cur.N = nval;
         cur.dist = d;
-        if (!first && cur.format == OutFmt::csv) cur.csv_header = false;
+        if (!first && cur.format == OutFmt::csv)
+          cur.csv_header = false;
         if (do_multi_plot) {
           cur.multi_plot_accumulate = true;
           namespace fs = std::filesystem;
           fs::path img(*opt.plot_path);
-          fs::path dat = img;
-          dat.replace_extension(std::string(".") + std::string(kDistNames[static_cast<int>(d)]) + std::string(".dat"));
+          fs::path dat = opt.output_dir.has_value()
+                             ? (fs::path(*opt.output_dir) /
+                                (img.stem().string() + std::string(".") +
+                                 std::string(
+                                     kDistNames[static_cast<int>(d)]) +
+                                 std::string(".dat")))
+                             : (img.replace_extension(std::string(".") +
+                                                      std::string(kDistNames[static_cast<int>(d)]) +
+                                                      std::string(".dat")));
+          if (opt.output_dir.has_value()) {
+            std::error_code ec;
+            fs::create_directories(fs::path(*opt.output_dir), ec);
+          }
           cur.plot_dat_path = dat.string();
         }
         switch (cur.type) {
-          case ElemType::i32: rc = run_for_type<int>(cur); break;
-          case ElemType::u32: rc = run_for_type<unsigned int>(cur); break;
-          case ElemType::i64: rc = run_for_type<long long>(cur); break;
-          case ElemType::u64: rc = run_for_type<unsigned long long>(cur); break;
-          case ElemType::f32: rc = run_for_type<float>(cur); break;
-          case ElemType::f64: rc = run_for_type<double>(cur); break;
+        case ElemType::i32:
+          rc = run_for_type<int>(cur);
+          break;
+        case ElemType::u32:
+          rc = run_for_type<unsigned int>(cur);
+          break;
+        case ElemType::i64:
+          rc = run_for_type<long long>(cur);
+          break;
+        case ElemType::u64:
+          rc = run_for_type<unsigned long long>(cur);
+          break;
+        case ElemType::f32:
+          rc = run_for_type<float>(cur);
+          break;
+        case ElemType::f64:
+          rc = run_for_type<double>(cur);
+          break;
+        case ElemType::str:
+          rc = run_for_type<std::string>(cur);
+          break;
         }
-        if (rc != 0) return rc;
+        if (rc != 0)
+          return rc;
         if (do_multi_plot) {
           namespace fs = std::filesystem;
           fs::path img(*opt.plot_path);
-          fs::path dat = img; dat.replace_extension(std::string(".") + std::string(kDistNames[static_cast<int>(d)]) + std::string(".dat"));
-          plot_parts.emplace_back(std::string(kDistNames[static_cast<int>(d)]), dat.string());
+          fs::path dat = opt.output_dir.has_value()
+                             ? (fs::path(*opt.output_dir) /
+                                (img.stem().string() + std::string(".") +
+                                 std::string(
+                                     kDistNames[static_cast<int>(d)]) +
+                                 std::string(".dat")))
+                             : (img.replace_extension(std::string(".") +
+                                                      std::string(kDistNames[static_cast<int>(d)]) +
+                                                      std::string(".dat")));
+          plot_parts.emplace_back(std::string(kDistNames[static_cast<int>(d)]),
+                                  dat.string());
         }
         first = false;
       }
@@ -1460,27 +1924,47 @@ int main(int argc, char **argv) {
     if (do_multi_plot) {
       namespace fs = std::filesystem;
       fs::path img(*opt.plot_path);
-      fs::path gp = img; gp.replace_extension(".gp");
+      fs::path gp = opt.output_dir.has_value()
+                        ? (fs::path(*opt.output_dir) /
+                           (img.stem().string() + std::string(".gp")))
+                        : (img.replace_extension(".gp"));
+      if (opt.output_dir.has_value()) {
+        std::error_code ec;
+        fs::create_directories(fs::path(*opt.output_dir), ec);
+      }
       std::ofstream gf(gp);
       if (!gf) {
         std::cerr << "Failed to open gnuplot file: " << gp << "\n";
         return 2;
       }
       std::string term;
-      if (has_ext(img.string(), ".png")) term = "pngcairo"; else if (has_ext(img.string(), ".jpg", ".jpeg")) term = "jpeg"; else term = "pngcairo";
-      gf << "set terminal " << term << " size " << opt.plot_w << "," << opt.plot_h << "\n";
+      if (has_ext(img.string(), ".png"))
+        term = "pngcairo";
+      else if (has_ext(img.string(), ".jpg", ".jpeg"))
+        term = "jpeg";
+      else
+        term = "pngcairo";
+      gf << "set terminal " << term << " size " << opt.plot_w << ","
+         << opt.plot_h << "\n";
       gf << "set output '" << img.string() << "'\n";
-      if (!opt.plot_title.empty()) gf << "set title '" << opt.plot_title << "'\n";
+      if (!opt.plot_title.empty())
+        gf << "set title '" << opt.plot_title << "'\n";
       gf << "set datafile separator '\t'\n";
       gf << "set xtics rotate by 45 right\n";
       gf << "set grid ytics\n";
-      gf << "set style data histogram\n";
-      gf << "set style fill solid 1.0 border -1\n";
-      gf << "set boxwidth 0.6\n";
-      gf << "set multiplot layout " << static_cast<int>(plot_parts.size()) << ",1\n";
+      if (opt.plot_style == PlotStyle::boxes) {
+        gf << "set style data histogram\n";
+        gf << "set style fill solid 1.0 border -1\n";
+        gf << "set boxwidth 0.6\n";
+      }
+      int rows = (opt.plot_rows > 0 ? opt.plot_rows
+                                    : static_cast<int>(plot_parts.size()));
+      int cols = (opt.plot_cols > 0 ? opt.plot_cols : 1);
+      gf << "set multiplot layout " << rows << "," << cols << "\n";
       for (const auto &pp : plot_parts) {
         gf << "set title '" << pp.first << "'\n";
-        gf << "plot '" << pp.second << "' using 2:xtic(1) title 'median' with boxes, \\\n";
+        gf << "plot '" << pp.second
+           << "' using 2:xtic(1) title 'median' with boxes, \\\n";
         gf << "     '' using 0:2:3:4 with yerrorbars notitle\n";
       }
       gf << "unset multiplot\n";
@@ -1488,12 +1972,14 @@ int main(int argc, char **argv) {
       std::string cmd = std::string("gnuplot '") + gp.string() + "'";
       int rc2 = std::system(cmd.c_str());
       if (rc2 != 0) {
-        std::cerr << "gnuplot failed (rc=" << rc2 << ") — ensure gnuplot is installed. Script: " << gp << "\n";
+        std::cerr << "gnuplot failed (rc=" << rc2
+                  << ") — ensure gnuplot is installed. Script: " << gp << "\n";
         return rc2;
       }
       if (!opt.keep_plot_artifacts) {
         std::error_code ec;
-        for (const auto &pp : plot_parts) fs::remove(pp.second, ec);
+        for (const auto &pp : plot_parts)
+          fs::remove(pp.second, ec);
         fs::remove(gp, ec);
       }
     }

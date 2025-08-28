@@ -96,6 +96,7 @@ Filter algorithms:
   - JSONL → `bench_result.jsonl` (appends, one JSON object per line).
   - Table → `bench_result.txt` (overwrites per invocation).
 - Override result path with `--results PATH`.
+- Suppress file writes for scripting with `--no-file` (prints to stdout only).
 
 ## Plotting
 
@@ -106,6 +107,7 @@ Common flags:
 - `--plot-title T` — title text.
 - `--plot-size WxH` — pixels (default 1000x600).
 - `--keep-plot-artifacts` — keep temporary `.dat` and `.gp` files.
+- `--output DIR` — write plot artifacts (`.dat`/`.gp` and plot-adjacent `.csv`) under `DIR` to keep your image directory clean.
 - `--plot-style boxes|lines` — default `boxes`. `lines` uses `linespoints` + `yerrorbars`.
 
 Single distribution:
@@ -114,7 +116,7 @@ Single distribution:
 
 Multiple distributions in one run:
 
-- sortbench writes a `.dat` for each distribution next to the image (e.g., `out.random.dat`).
+- sortbench writes a `.dat` for each distribution next to the image (e.g., `out.random.dat`). When `--output DIR` is set, these go under `DIR` as `out.random.dat` instead.
 - Generates a single `.gp` with `set multiplot` and one subplot per distribution.
 - Layout: default `Ndists x 1`; configure with `--plot-layout RxC`.
 
@@ -204,4 +206,3 @@ The loader prefers v2 and registers only entrypoints matching the current elemen
 - Plotting requires gnuplot in PATH. CSV/JSON/JSONL outputs work without it.
 - PDQSort, GNU parallel std::sort, and `std::execution` parallel variants appear only if headers are available at build time.
 - JSONL is best for accumulating many runs; CSV is also append‑friendly within one invocation.
-
