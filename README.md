@@ -6,7 +6,7 @@ sortbench is a self‑contained CLI to benchmark sorting algorithms across data 
 
 - Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, quicksort hybrid, radix (for integral types), optional PDQSort, and user plugins.
 - Distributions: `random`, `partial`, `dups`, `reverse`, plus `sorted`, `saw`, `runs`, `gauss`, `exp`, `zipf`.
-- Element types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`.
+- Element types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `str`.
 - Repeats, warmup, verification, CSV/table/JSON/JSONL output, per‑run stats.
 - Plotting: single plot or multiplot across multiple distributions (boxes or lines style).
 - Plugins: simple C interface, v1 (int only) and v2 (multi‑type) ABIs.
@@ -84,8 +84,10 @@ Filter algorithms:
 ## Element types
 
 ```
---type i32|u32|i64|u64|f32|f64   # default i32
+--type i32|u32|i64|u64|f32|f64|str   # default i32
 ```
+
+- `str` generates fixed-length, lexicographically sortable strings and supports the same distributions (random, partial, dups, reverse, sorted, saw, runs, gauss, exp, zipf).
 
 ## Output formats and files
 
@@ -191,7 +193,7 @@ The loader prefers v2 and registers only entrypoints matching the current elemen
 - `--dist random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf` (repeatable or comma‑list)
 - `--repeat K`, `--warmup W`, `--seed S`
 - `--algo name[,name...]`, `--algo-re REGEX[,REGEX...]`
-- `--type i32|u32|i64|u64|f32|f64`
+- `--type i32|u32|i64|u64|f32|f64|str`
 - `--format csv|table|json|jsonl`, `--no-header`, `--results PATH`
 - `--verify`, `--assert-sorted`
 - `--threads K`
