@@ -4,7 +4,7 @@ sortbench is a self‑contained CLI to benchmark sorting algorithms across data 
 
 ## Features
 
-- Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, quicksort hybrid, radix (for integral types), optional PDQSort, and user plugins.
+- Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, `timsort`, quicksort hybrid, radix (for integral types), optional PDQSort, and user plugins.
 - Distributions: `random`, `partial`, `dups`, `reverse`, plus `sorted`, `saw`, `runs`, `gauss`, `exp`, `zipf`.
 - Element types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `str`.
 - Repeats, warmup, verification, CSV/table/JSON/JSONL output, per‑run stats.
@@ -92,6 +92,7 @@ Filter algorithms:
 ## Output formats and files
 
 - `--format csv|table|json|jsonl` (default `csv`).
+- `--baseline NAME` — compute and report speedups vs this algorithm (adds `speedup_vs_baseline` to outputs and a per-run winner summary).
 - Results are printed to stdout and also written to a file by default:
   - CSV → `bench_result.csv` (appends on multi-run sweeps in one invocation).
   - JSON → `bench_result.json` (overwrites per invocation).

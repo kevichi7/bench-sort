@@ -160,6 +160,7 @@ struct Options {
   std::optional<std::string>
       init_plugin_out;                     // path to write scaffold plugin .cpp
   std::optional<std::string> results_path; // results output path
+  std::optional<std::string> baseline;     // baseline algo for speedup compare
   bool no_file = false;                    // suppress writing results files
   std::optional<std::string> output_dir;   // directory for plot artifacts
   // Plotting options
@@ -262,10 +263,12 @@ static void print_usage(const char *argv0) {
   std::cerr << "       --print-build (print compiler/flags used)\n";
   std::cerr << "       --build-plugin <src.cpp> --out <lib.so> (compile plugin "
                "with recorded flags)\n";
+  std::cerr << "       --baseline NAME (compute speedups vs this algo)\n";
   std::cerr << "       --no-file (print to stdout only; no results files)\n";
   std::cerr << "       --plot <out.png|.jpg> [--plot-title T] [--plot-size "
                "WxH] (generate a plot with med/min/max)\n";
-  std::cerr << "       --output DIR (write plot artifacts .dat/.gp under DIR)\n";
+  std::cerr
+      << "       --output DIR (write plot artifacts .dat/.gp under DIR)\n";
   std::cerr << "       --keep-plot-artifacts (keep temporary .dat/.gp next to "
                "the image)\n";
   std::cerr << "       --plot-layout RxC (multiplot grid when multiple --dist "
@@ -463,11 +466,12 @@ static Options parse_args(int argc, char **argv) {
     } else if (a == "--results" || a.rfind("--results=", 0) == 0) {
       opt.results_path =
           get_value_inline(a, "--results").value_or(need_value(a));
+    } else if (a == "--baseline" || a.rfind("--baseline=", 0) == 0) {
+      opt.baseline = get_value_inline(a, "--baseline").value_or(need_value(a));
     } else if (a == "--no-file") {
       opt.no_file = true;
     } else if (a == "--output" || a.rfind("--output=", 0) == 0) {
-      opt.output_dir =
-          get_value_inline(a, "--output").value_or(need_value(a));
+      opt.output_dir = get_value_inline(a, "--output").value_or(need_value(a));
     } else if (a == "--plot-title" || a.rfind("--plot-title=", 0) == 0) {
       opt.plot_title =
           get_value_inline(a, "--plot-title").value_or(need_value(a));
@@ -906,6 +910,122 @@ template <class T> inline void quicksort_hybrid(std::vector<T> &v) {
     quicksort_hybrid_impl(v.begin(), v.end());
 }
 
+// Simplified TimSort: detects natural runs, extends short runs to a minrun
+// via binary insertion sort, and merges adjacent runs using stable merge.
+template <class T>
+static inline void binary_insertion_sort(std::vector<T> &v, std::size_t lo,
+                                         std::size_t hi) {
+  for (std::size_t i = lo + 1; i < hi; ++i) {
+    T x = v[i];
+    std::size_t left = lo, right = i;
+    while (left < right) {
+      std::size_t mid = left + ((right - left) >> 1);
+      if (!(x < v[mid]))
+        left = mid + 1;
+      else
+        right = mid;
+    }
+    for (std::size_t j = i; j > left; --j)
+      v[j] = std::move(v[j - 1]);
+    v[left] = std::move(x);
+  }
+}
+
+template <class T>
+static inline void stable_merge(std::vector<T> &v, std::size_t lo,
+                                std::size_t mid, std::size_t hi,
+                                std::vector<T> &buf) {
+  std::size_t n1 = mid - lo, n2 = hi - mid;
+  buf.resize(std::max(buf.size(), n1));
+  for (std::size_t i = 0; i < n1; ++i)
+    buf[i] = std::move(v[lo + i]);
+  std::size_t i = 0, j = mid, k = lo;
+  while (i < n1 && j < hi) {
+    if (!(v[j] < buf[i]))
+      v[k++] = std::move(buf[i++]);
+    else
+      v[k++] = std::move(v[j++]);
+  }
+  while (i < n1)
+    v[k++] = std::move(buf[i++]);
+  // right half already in place
+}
+
+template <class T> inline void timsort(std::vector<T> &v) {
+  const std::size_t n = v.size();
+  if (n < 2)
+    return;
+  // Compute minrun (like Python's timsort)
+  auto calc_minrun = [](std::size_t n) {
+    unsigned r = 0;
+    while (n >= 64) {
+      r |= (n & 1u);
+      n >>= 1u;
+    }
+    return static_cast<std::size_t>(n + r);
+  };
+  const std::size_t minrun = calc_minrun(n);
+  struct Run {
+    std::size_t base;
+    std::size_t len;
+  };
+  std::vector<Run> stack;
+  std::vector<T> buf;
+  std::size_t i = 0;
+  while (i < n) {
+    std::size_t lo = i;
+    if (i + 1 == n) {
+      i = n;
+    } else {
+      // Identify run: ascending or descending
+      if (v[i + 1] < v[i]) { // descending
+        std::size_t j = i + 2;
+        while (j < n && v[j] < v[j - 1])
+          ++j;
+        std::reverse(v.begin() + static_cast<std::ptrdiff_t>(i),
+                     v.begin() + static_cast<std::ptrdiff_t>(j));
+        i = j;
+      } else { // ascending
+        std::size_t j = i + 2;
+        while (j < n && !(v[j] < v[j - 1]))
+          ++j;
+        i = j;
+      }
+    }
+    std::size_t run_hi = i;
+    std::size_t run_len = run_hi - lo;
+    // Extend to minrun
+    if (run_len < minrun) {
+      std::size_t end = std::min(lo + minrun, n);
+      binary_insertion_sort(v, lo, end);
+      run_hi = end;
+      run_len = run_hi - lo;
+      i = run_hi;
+    }
+    stack.push_back(Run{lo, run_len});
+    // Merge to maintain non-increasing run sizes (simple invariant)
+    while (stack.size() >= 2) {
+      auto &A = stack[stack.size() - 2];
+      auto &B = stack[stack.size() - 1];
+      if (A.len <= B.len) {
+        stable_merge(v, A.base, A.base + A.len, B.base + B.len, buf);
+        A.len += B.len;
+        stack.pop_back();
+      } else {
+        break;
+      }
+    }
+  }
+  // Merge remaining runs from bottom
+  while (stack.size() > 1) {
+    auto B = stack.back();
+    stack.pop_back();
+    auto &A = stack.back();
+    stable_merge(v, A.base, A.base + A.len, B.base + B.len, buf);
+    A.len += B.len;
+  }
+}
+
 // Radix sort (LSD) base 256 for non-negative integers with reusable buffers
 template <class T> inline void radix_sort_lsd(std::vector<T> &v) {
   static_assert(std::is_unsigned<T>::value || std::is_integral<T>::value,
@@ -985,6 +1105,7 @@ template <class T> static std::vector<AlgoT<T>> build_registry_t() {
 #endif
   regs.push_back({"heap_sort", [](auto &v) { algos::heap_sort(v); }});
   regs.push_back({"merge_sort_opt", [](auto &v) { algos::merge_sort_opt(v); }});
+  regs.push_back({"timsort", [](auto &v) { algos::timsort(v); }});
   regs.push_back(
       {"quicksort_hybrid", [](auto &v) { algos::quicksort_hybrid(v); }});
   if constexpr (std::is_integral_v<T>) {
@@ -1292,8 +1413,7 @@ static int write_gnuplot_and_run(
   int rc = std::system(cmd.c_str());
   if (rc != 0) {
     std::cerr << "gnuplot failed (rc=" << rc
-              << ") — ensure gnuplot is installed. Script: " << gp_path
-              << "\n";
+              << ") — ensure gnuplot is installed. Script: " << gp_path << "\n";
   }
   if (!keep_files) {
     std::error_code ec;
@@ -1380,7 +1500,8 @@ template <class T> static int run_for_type(const Options &opt_base) {
     double tmin;
     double tmax; // min/max ms
     double tmean;
-    double tstd; // mean/stddev ms
+    double tstd;    // mean/stddev ms
+    double speedup; // vs baseline (filled later)
   };
   std::vector<Row> rows;
   rows.reserve(regs.size());
@@ -1425,17 +1546,73 @@ template <class T> static int run_for_type(const Options &opt_base) {
     double sdev = (times.size() >= 2 ? std::sqrt(var) : 0.0);
     rows.push_back(Row{algo.name, opt.N,
                        std::string(kDistNames[static_cast<int>(opt.dist)]), med,
-                       tmin, tmax, mean, sdev});
+                       tmin, tmax, mean, sdev, 1.0});
+  }
+
+  // Compute baseline speedups and print winner summary
+  double baseline_med = 0.0;
+  std::string baseline_name;
+  if (opt.baseline.has_value()) {
+    baseline_name = to_lower(*opt.baseline);
+    for (const auto &r : rows) {
+      if (to_lower(r.algo) == baseline_name) {
+        baseline_med = r.t;
+        break;
+      }
+    }
+    if (baseline_med == 0.0 && !rows.empty()) {
+      std::cerr << "Baseline not found: '" << *opt.baseline
+                << "' — speedups default to 1.0\n";
+    }
+  }
+  for (auto &r : rows)
+    r.speedup =
+        (baseline_med > 0.0 ? (baseline_med / std::max(1e-12, r.t)) : 1.0);
+
+  // Winner summary per run
+  if (!rows.empty()) {
+    const Row *best = &rows[0];
+    for (const auto &r : rows) {
+      if (opt.baseline.has_value()) {
+        if (r.speedup > best->speedup)
+          best = &r;
+      } else {
+        if (r.t < best->t)
+          best = &r;
+      }
+    }
+    if (opt.baseline.has_value()) {
+      std::cerr << "Winner (N=" << opt.N
+                << ", dist=" << kDistNames[static_cast<int>(opt.dist)]
+                << "): algo=" << best->algo << ", median_ms=" << best->t
+                << ", speedup_vs_baseline=" << best->speedup;
+      if (baseline_med > 0.0)
+        std::cerr << " (baseline '" << *opt.baseline
+                  << "' median_ms=" << baseline_med << ")";
+      std::cerr << "\n";
+    } else {
+      std::cerr << "Winner (N=" << opt.N
+                << ", dist=" << kDistNames[static_cast<int>(opt.dist)]
+                << "): algo=" << best->algo << ", median_ms=" << best->t
+                << "\n";
+    }
   }
 
   if (opt.format == OutFmt::csv) {
     auto write_csv = [&](std::ostream &os, bool with_header) {
-      if (with_header)
-        os << "algo,N,dist,median_ms,mean_ms,min_ms,max_ms,stddev_ms\n";
+      if (with_header) {
+        os << "algo,N,dist,median_ms,mean_ms,min_ms,max_ms,stddev_ms";
+        if (opt.baseline.has_value())
+          os << ",speedup_vs_baseline";
+        os << "\n";
+      }
       for (const auto &r : rows) {
         os << r.algo << ',' << r.N << ',' << r.dist << ',' << std::fixed
            << std::setprecision(3) << r.t << ',' << r.tmean << ',' << r.tmin
-           << ',' << r.tmax << ',' << r.tstd << "\n";
+           << ',' << r.tmax << ',' << r.tstd;
+        if (opt.baseline.has_value())
+          os << ',' << std::setprecision(3) << r.speedup;
+        os << "\n";
       }
     };
     write_csv(std::cout, opt.csv_header);
@@ -1523,7 +1700,10 @@ template <class T> static int run_for_type(const Options &opt_base) {
       js << "\"mean_ms\":" << r.tmean << ",";
       js << "\"min_ms\":" << r.tmin << ",";
       js << "\"max_ms\":" << r.tmax << ",";
-      js << "\"stddev_ms\":" << r.tstd << "}";
+      js << "\"stddev_ms\":" << r.tstd;
+      if (opt.baseline.has_value())
+        js << ",\"speedup_vs_baseline\":" << r.speedup;
+      js << "}";
       if (i + 1 != rows.size())
         js << ",";
       js << "\n";
@@ -1533,8 +1713,9 @@ template <class T> static int run_for_type(const Options &opt_base) {
     // Write JSON file (overwrite per run)
     if (!opt.no_file) {
       namespace fs = std::filesystem;
-      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                                 : fs::path("bench_result.json");
+      fs::path rp = opt.results_path.has_value()
+                        ? fs::path(*opt.results_path)
+                        : fs::path("bench_result.json");
       std::error_code ec;
       if (rp.has_parent_path())
         fs::create_directories(rp.parent_path(), ec);
@@ -1587,7 +1768,10 @@ template <class T> static int run_for_type(const Options &opt_base) {
            << "\"mean_ms\":" << r.tmean << ","
            << "\"min_ms\":" << r.tmin << ","
            << "\"max_ms\":" << r.tmax << ","
-           << "\"stddev_ms\":" << r.tstd << "}" << '\n';
+           << "\"stddev_ms\":" << r.tstd;
+        if (opt.baseline.has_value())
+          os << ",\"speedup_vs_baseline\":" << r.speedup;
+        os << "}" << '\n';
       }
     };
     // stdout
@@ -1595,8 +1779,9 @@ template <class T> static int run_for_type(const Options &opt_base) {
     // append to file
     if (!opt.no_file) {
       namespace fs = std::filesystem;
-      fs::path rp = opt.results_path.has_value() ? fs::path(*opt.results_path)
-                                                 : fs::path("bench_result.jsonl");
+      fs::path rp = opt.results_path.has_value()
+                        ? fs::path(*opt.results_path)
+                        : fs::path("bench_result.jsonl");
       std::error_code ec;
       if (rp.has_parent_path())
         fs::create_directories(rp.parent_path(), ec);
@@ -1616,6 +1801,7 @@ template <class T> static int run_for_type(const Options &opt_base) {
     std::size_t w_min = std::string("min_ms").size();
     std::size_t w_max = std::string("max_ms").size();
     std::size_t w_std = std::string("stddev_ms").size();
+    std::size_t w_spd = std::string("speedup").size();
     for (const auto &r : rows) {
       w_algo = std::max(w_algo, r.algo.size());
       w_N = std::max(w_N, std::to_string(r.N).size());
@@ -1630,6 +1816,8 @@ template <class T> static int run_for_type(const Options &opt_base) {
       w_min = std::max<std::size_t>(w_min, widen(r.tmin));
       w_max = std::max<std::size_t>(w_max, widen(r.tmax));
       w_std = std::max<std::size_t>(w_std, widen(r.tstd));
+      if (opt.baseline.has_value())
+        w_spd = std::max<std::size_t>(w_spd, widen(r.speedup));
     }
     auto print_table_to = [&](std::ostream &os) {
       auto print_sep = [&]() {
@@ -1638,11 +1826,14 @@ template <class T> static int run_for_type(const Options &opt_base) {
            << '+' << std::string(w_med + 2, '-') << '+'
            << std::string(w_mean + 2, '-') << '+' << std::string(w_min + 2, '-')
            << '+' << std::string(w_max + 2, '-') << '+'
-           << std::string(w_std + 2, '-') << "+\n";
+           << std::string(w_std + 2, '-');
+        if (opt.baseline.has_value())
+          os << '+' << std::string(w_spd + 2, '-');
+        os << "+\n";
       };
       auto print_row = [&](std::string a, std::string n, std::string d,
                            std::string med, std::string mean, std::string mn,
-                           std::string mx, std::string sd) {
+                           std::string mx, std::string sd, std::string spd) {
         os << "| " << std::left << std::setw(static_cast<int>(w_algo)) << a
            << " | " << std::right << std::setw(static_cast<int>(w_N)) << n
            << " | " << std::left << std::setw(static_cast<int>(w_dist)) << d
@@ -1650,13 +1841,18 @@ template <class T> static int run_for_type(const Options &opt_base) {
            << " | " << std::right << std::setw(static_cast<int>(w_mean)) << mean
            << " | " << std::right << std::setw(static_cast<int>(w_min)) << mn
            << " | " << std::right << std::setw(static_cast<int>(w_max)) << mx
-           << " | " << std::right << std::setw(static_cast<int>(w_std)) << sd
-           << " |\n";
+           << " | " << std::right << std::setw(static_cast<int>(w_std)) << sd;
+        if (opt.baseline.has_value())
+          os << " | " << std::right << std::setw(static_cast<int>(w_spd))
+             << spd;
+        os << " |\n";
       };
       if (opt.csv_header) {
         print_sep();
         print_row("algo", "N", "dist", "median_ms", "mean_ms", "min_ms",
-                  "max_ms", "stddev_ms");
+                  "max_ms", "stddev_ms",
+                  opt.baseline.has_value() ? std::string("speedup")
+                                           : std::string(""));
         print_sep();
       }
       auto fmt = [](double v) {
@@ -1666,7 +1862,8 @@ template <class T> static int run_for_type(const Options &opt_base) {
       };
       for (const auto &r : rows) {
         print_row(r.algo, std::to_string(r.N), r.dist, fmt(r.t), fmt(r.tmean),
-                  fmt(r.tmin), fmt(r.tmax), fmt(r.tstd));
+                  fmt(r.tmin), fmt(r.tmax), fmt(r.tstd),
+                  opt.baseline.has_value() ? fmt(r.speedup) : std::string(""));
       }
       if (opt.csv_header)
         print_sep();
@@ -1863,15 +2060,16 @@ int main(int argc, char **argv) {
           cur.multi_plot_accumulate = true;
           namespace fs = std::filesystem;
           fs::path img(*opt.plot_path);
-          fs::path dat = opt.output_dir.has_value()
-                             ? (fs::path(*opt.output_dir) /
-                                (img.stem().string() + std::string(".") +
-                                 std::string(
-                                     kDistNames[static_cast<int>(d)]) +
-                                 std::string(".dat")))
-                             : (img.replace_extension(std::string(".") +
-                                                      std::string(kDistNames[static_cast<int>(d)]) +
-                                                      std::string(".dat")));
+          fs::path dat =
+              opt.output_dir.has_value()
+                  ? (fs::path(*opt.output_dir) /
+                     (img.stem().string() + std::string(".") +
+                      std::string(kDistNames[static_cast<int>(d)]) +
+                      std::string(".dat")))
+                  : (img.replace_extension(
+                        std::string(".") +
+                        std::string(kDistNames[static_cast<int>(d)]) +
+                        std::string(".dat")));
           if (opt.output_dir.has_value()) {
             std::error_code ec;
             fs::create_directories(fs::path(*opt.output_dir), ec);
@@ -1906,15 +2104,16 @@ int main(int argc, char **argv) {
         if (do_multi_plot) {
           namespace fs = std::filesystem;
           fs::path img(*opt.plot_path);
-          fs::path dat = opt.output_dir.has_value()
-                             ? (fs::path(*opt.output_dir) /
-                                (img.stem().string() + std::string(".") +
-                                 std::string(
-                                     kDistNames[static_cast<int>(d)]) +
-                                 std::string(".dat")))
-                             : (img.replace_extension(std::string(".") +
-                                                      std::string(kDistNames[static_cast<int>(d)]) +
-                                                      std::string(".dat")));
+          fs::path dat =
+              opt.output_dir.has_value()
+                  ? (fs::path(*opt.output_dir) /
+                     (img.stem().string() + std::string(".") +
+                      std::string(kDistNames[static_cast<int>(d)]) +
+                      std::string(".dat")))
+                  : (img.replace_extension(
+                        std::string(".") +
+                        std::string(kDistNames[static_cast<int>(d)]) +
+                        std::string(".dat")));
           plot_parts.emplace_back(std::string(kDistNames[static_cast<int>(d)]),
                                   dat.string());
         }
