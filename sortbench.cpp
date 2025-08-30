@@ -97,11 +97,15 @@ enum class Dist : int {
   runs = 6,
   gauss = 7,
   exp = 8,
-  zipf = 9
+  zipf = 9,
+  organpipe = 10,
+  staggered = 11,
+  runs_ht = 12
 };
-static constexpr std::array<std::string_view, 10> kDistNames{
-    "random", "partial", "dups",  "reverse", "sorted",
-    "saw",    "runs",    "gauss", "exp",     "zipf"};
+static constexpr std::array<std::string_view, 13> kDistNames{
+    "random",    "partial",  "dups",     "reverse",  "sorted",
+    "saw",       "runs",     "gauss",    "exp",      "zipf",
+    "organpipe", "staggered","runs_ht"};
 
 enum class OutFmt : int { csv = 0, table = 1, json = 2, jsonl = 3 };
 enum class PlotStyle : int { boxes = 0, lines = 1 };
@@ -172,6 +176,10 @@ struct Options {
   int plot_rows = 0;                       // 0 = auto (Ndists), otherwise rows
   int plot_cols = 0;                       // 0 = auto (1), otherwise cols
   PlotStyle plot_style = PlotStyle::boxes; // boxes or lines
+  // Extra distribution params
+  double zipf_s = 1.2;        // Zipf skew parameter
+  double runs_alpha = 1.5;    // heavy-tail alpha for runs_ht
+  int stagger_block = 32;     // block size for 'staggered'
 };
 
 // Utilities
@@ -208,6 +216,12 @@ static std::optional<Dist> parse_dist(std::string s) {
     return Dist::exp;
   if (s == "zipf")
     return Dist::zipf;
+  if (s == "organpipe" || s == "organ-pipe")
+    return Dist::organpipe;
+  if (s == "staggered")
+    return Dist::staggered;
+  if (s == "runs_ht" || s == "kruns_ht")
+    return Dist::runs_ht;
   return std::nullopt;
 }
 
@@ -270,6 +284,12 @@ static void print_usage(const char *argv0) {
                "default i32)\n";
   std::cerr << "       --assert-sorted (check each run result is sorted; fails "
                "fast)\n";
+  std::cerr << "       --zipf-s S (Zipf skew, default 1.2)\n";
+  std::cerr << "       --runs-alpha A (heavy-tail alpha for runs_ht, default 1.5)\n";
+  std::cerr << "       --stagger-block B (block size for 'staggered', default 32)\n";
+  std::cerr << "       --zipf-s S (Zipf skew, default 1.2)\n";
+  std::cerr << "       --runs-alpha A (heavy-tail alpha for runs_ht, default 1.5)\n";
+  std::cerr << "       --stagger-block B (block size for 'staggered', default 32)\n";
 }
 
 static Options parse_args(int argc, char **argv) {
@@ -496,6 +516,18 @@ static Options parse_args(int argc, char **argv) {
         opt.plot_style = PlotStyle::lines;
       else
         throw std::runtime_error("Invalid --plot-style (boxes|lines)");
+    } else if (a == "--zipf-s" || a.rfind("--zipf-s=", 0) == 0) {
+      std::string v = get_value_inline(a, "--zipf-s").value_or(need_value(a));
+      opt.zipf_s = std::strtod(v.c_str(), nullptr);
+      if (!(opt.zipf_s > 0.0)) opt.zipf_s = 1.2;
+    } else if (a == "--runs-alpha" || a.rfind("--runs-alpha=", 0) == 0) {
+      std::string v = get_value_inline(a, "--runs-alpha").value_or(need_value(a));
+      opt.runs_alpha = std::strtod(v.c_str(), nullptr);
+      if (!(opt.runs_alpha > 0.0)) opt.runs_alpha = 1.5;
+    } else if (a == "--stagger-block" || a.rfind("--stagger-block=", 0) == 0) {
+      std::string v = get_value_inline(a, "--stagger-block").value_or(need_value(a));
+      opt.stagger_block = std::stoi(v);
+      if (opt.stagger_block <= 0) opt.stagger_block = 32;
     } else if (a == "--threads" || a.rfind("--threads=", 0) == 0) {
       std::string v = get_value_inline(a, "--threads").value_or(need_value(a));
       opt.threads = std::stoi(v);
@@ -1471,6 +1503,9 @@ template <class T> static int run_for_type(const Options &opt) {
   cfg.threads = opt.threads;
   cfg.plugin_paths = opt.plugin_paths;
   cfg.baseline = opt.baseline;
+  cfg.zipf_s = opt.zipf_s;
+  cfg.runs_alpha = opt.runs_alpha;
+  cfg.stagger_block = opt.stagger_block;
 
   sortbench::RunResult r;
   try {

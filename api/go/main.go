@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "log/slog"
     "log"
     "net/http"
     "os"
@@ -144,49 +145,57 @@ func listAlgos(typ string, plugins []string) ([]string, error) {
 }
 
 func runHandler(w http.ResponseWriter, r *http.Request) {
-	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
-		return
-	}
-	if err := validate(&req); err != nil {
-		writeJSON(w, 400, errorResp{Error: err.Error()})
-		return
-	}
+    start := time.Now()
+    var req RunRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
+        slog.Warn("run_invalid_json", "error", err.Error())
+        return
+    }
+    if err := validate(&req); err != nil {
+        writeJSON(w, 400, errorResp{Error: err.Error()})
+        slog.Warn("run_invalid_args", "error", err.Error(), "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads)
+        return
+    }
 	tout := defaultTimeout
 	if req.TimeoutMs > 0 {
 		tout = time.Duration(req.TimeoutMs) * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), tout)
 	defer cancel()
-	if os.Getenv("SORTBENCH_CGO") == "1" {
-		out, err := runCGO(req)
-		if err != nil {
-			writeJSON(w, 500, errorResp{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		_, _ = w.Write(out)
-		return
-	}
-	{
-		args := buildArgs(&req)
-		cmd := exec.CommandContext(ctx, sbPath(), args...)
-		out, err := cmd.Output()
-		if err != nil {
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
-				writeJSON(w, 500, errorResp{Error: fmt.Sprintf("sortbench failed: %s", string(ee.Stderr))})
-			} else {
-				writeJSON(w, 500, errorResp{Error: err.Error()})
-			}
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		_, _ = w.Write(out)
-	}
+    if os.Getenv("SORTBENCH_CGO") == "1" {
+        out, err := runCGO(req)
+        if err != nil {
+            writeJSON(w, 500, errorResp{Error: err.Error()})
+            slog.Error("run_failed", "mode", "cgo", "error", err.Error(), "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(200)
+        _, _ = w.Write(out)
+        slog.Info("run_ok", "mode", "cgo", "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
+        return
+    }
+    {
+        args := buildArgs(&req)
+        cmd := exec.CommandContext(ctx, sbPath(), args...)
+        out, err := cmd.Output()
+        if err != nil {
+            var ee *exec.ExitError
+            if errors.As(err, &ee) {
+                writeJSON(w, 500, errorResp{Error: fmt.Sprintf("sortbench failed: %s", string(ee.Stderr))})
+                slog.Error("run_failed", "mode", "shell", "error", string(ee.Stderr), "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
+            } else {
+                writeJSON(w, 500, errorResp{Error: err.Error()})
+                slog.Error("run_failed", "mode", "shell", "error", err.Error(), "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
+            }
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(200)
+        _, _ = w.Write(out)
+        slog.Info("run_ok", "mode", "shell", "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
+    }
 }
 
 // metrics wrapper
@@ -245,10 +254,10 @@ func genID() string {
 
 // POST /jobs — submit async run
 func submitJobHandler(w http.ResponseWriter, r *http.Request) {
-	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
-		return
+    var req RunRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
+        return
 	}
 	if err := validate(&req); err != nil {
 		writeJSON(w, 400, errorResp{Error: err.Error()})
@@ -256,9 +265,10 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id := genID()
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	job := &Job{ID: id, Status: JobPending, CreatedAt: time.Now(), cancel: cancel}
+    job := &Job{ID: id, Status: JobPending, CreatedAt: time.Now(), cancel: cancel}
     jobs.create(job)
     jobsSubmitted.Inc()
+    slog.Info("job_submit", "job_id", id, "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads)
     go func() {
         job.Status = JobRunning
         job.StartedAt = time.Now()
@@ -286,16 +296,19 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
                 job.Status = JobCanceled
                 job.Error = ctx.Err().Error()
                 jobsCompleted.WithLabelValues("canceled").Inc()
+                slog.Warn("job_canceled", "job_id", id, "duration_ms", job.DurationMs)
             } else {
                 job.Status = JobFailed
                 job.Error = err.Error()
                 jobsCompleted.WithLabelValues("failed").Inc()
+                slog.Error("job_failed", "job_id", id, "error", err.Error(), "duration_ms", job.DurationMs)
             }
             return
         }
         job.ResultJSON = json.RawMessage(out)
         job.Status = JobDone
         jobsCompleted.WithLabelValues("done").Inc()
+        slog.Info("job_done", "job_id", id, "duration_ms", job.DurationMs)
     }()
     writeJSON(w, 202, map[string]string{"job_id": id})
 }
@@ -322,14 +335,15 @@ func cancelJobHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, errorResp{Error: "missing job id"})
 		return
 	}
-	if j, ok := jobs.get(id); ok {
-		if j.cancel != nil {
-			j.cancel()
-		}
-		writeJSON(w, 200, map[string]string{"status": "cancelled"})
-	} else {
-		writeJSON(w, 404, errorResp{Error: "not found"})
-	}
+    if j, ok := jobs.get(id); ok {
+        if j.cancel != nil {
+            j.cancel()
+        }
+        slog.Warn("job_cancel_request", "job_id", id)
+        writeJSON(w, 200, map[string]string{"status": "cancelled"})
+    } else {
+        writeJSON(w, 404, errorResp{Error: "not found"})
+    }
 }
 
 func validate(req *RunRequest) error {
@@ -440,6 +454,16 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+    // structured JSON logs with optional level
+    lvl := new(slog.LevelVar)
+    lvl.Set(slog.LevelInfo)
+    switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+    case "debug": lvl.Set(slog.LevelDebug)
+    case "warn": lvl.Set(slog.LevelWarn)
+    case "error": lvl.Set(slog.LevelError)
+    }
+    logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+    slog.SetDefault(logger)
     mux := http.NewServeMux()
     mux.Handle("/metrics", promhttp.Handler())
     mux.Handle("/healthz", withMetrics("healthz", healthHandler))

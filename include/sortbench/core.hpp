@@ -26,6 +26,9 @@ enum class Dist : int {
   gauss = 7,
   exp = 8,
   zipf = 9,
+  organpipe = 10,
+  staggered = 11,
+  runs_ht = 12,
 };
 
 // Output-friendly distribution names
@@ -52,6 +55,10 @@ struct CoreConfig {
   int threads = 0;                       // OMP/TBB max threads (0 = default)
   std::vector<std::string> plugin_paths; // (phase 2) optional .so to load
   std::optional<std::string> baseline;   // compute speedups vs baseline algo
+  // Extra distribution params
+  double zipf_s = 1.2;        // Zipf skew parameter
+  double runs_alpha = 1.5;    // heavy-tail alpha for runs_ht
+  int stagger_block = 32;     // block size for 'staggered'
 };
 
 struct TimingStats {

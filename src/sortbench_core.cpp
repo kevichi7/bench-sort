@@ -96,9 +96,10 @@ namespace sortbench {
 using Clock = std::chrono::steady_clock;
 using ms = std::chrono::duration<double, std::milli>;
 
-static constexpr std::array<std::string_view, 10> kDistNames{
-    "random", "partial", "dups",  "reverse", "sorted",
-    "saw",    "runs",    "gauss", "exp",     "zipf"};
+static constexpr std::array<std::string_view, 13> kDistNames{
+    "random",    "partial",  "dups",     "reverse",  "sorted",
+    "saw",       "runs",     "gauss",    "exp",      "zipf",
+    "organpipe", "staggered","runs_ht"};
 
 std::string_view dist_name(Dist d) {
   int i = static_cast<int>(d);
@@ -144,7 +145,7 @@ static inline std::uint64_t default_seed() { return 0x9E3779B97F4A7C15ULL; }
 // Data generation (subset matching CLI behavior)
 template <class T>
 static std::vector<T> make_data(std::size_t n, Dist dist, std::mt19937_64 &rng,
-                                int partial_pct, int dups_k) {
+                                int partial_pct, int dups_k, const CoreConfig& cfg) {
   std::vector<T> v;
   v.resize(n);
   if constexpr (std::is_same_v<T, std::string>) {
@@ -708,7 +709,7 @@ template <class T> static RunResult run_for_type_core(const CoreConfig &cfg) {
 
   std::mt19937_64 rng(cfg.seed.value_or(default_seed()));
   std::vector<T> original = make_data<T>(
-      cfg.N, cfg.dist, rng, cfg.partial_shuffle_pct, cfg.dup_values);
+      cfg.N, cfg.dist, rng, cfg.partial_shuffle_pct, cfg.dup_values, cfg);
   std::vector<T> work;
 
   if (cfg.verify) {
