@@ -1,13 +1,3 @@
-// sortbench.cpp
-// CLI benchmark for sorting algorithms with CSV output.
-// Features:
-// - Distributions: random, partial, dups, reverse
-// - Algorithms: std::sort, std::stable_sort, heap_sort, merge_sort_opt,
-// quicksort_hybrid, radix_sort_lsd, pdqsort (if present)
-// - --algo flags to select algorithms; default = all available
-// - --repeat to run multiple times and report median time
-// - CSV output: algo,N,dist,time_ms
-
 #include <algorithm>
 #include <array>
 #include <chrono>
