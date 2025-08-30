@@ -1,4 +1,4 @@
-# sortbench — Sorting Algorithm Benchmark (CLI + API)
+# bench-sort — Sorting Algorithm Benchmark (CLI + API)
 
 sortbench is a high‑performance sorting benchmark with:
 - A self‑contained C++ CLI for benchmarking algorithms across sizes, element types, and input distributions.
