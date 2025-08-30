@@ -50,6 +50,40 @@
 #define SB_HAS_PDQ 0
 #endif
 
+// Optional custom algo header (try both src-relative and project-root paths)
+#if defined(__has_include)
+#if __has_include("../custom_algo.hpp")
+#include "../custom_algo.hpp"
+#define SB_HAS_CUSTOM 1
+#elif __has_include("custom_algo.hpp")
+#include "custom_algo.hpp"
+#define SB_HAS_CUSTOM 1
+#else
+#define SB_HAS_CUSTOM 0
+#endif
+#else
+#define SB_HAS_CUSTOM 0
+#endif
+
+// Optional parallel headers
+#if defined(__has_include)
+#if __has_include(<execution>)
+#include <execution>
+#define SB_HAS_STD_PAR 1
+#else
+#define SB_HAS_STD_PAR 0
+#endif
+#if __has_include(<parallel/algorithm>)
+#include <parallel/algorithm>
+#define SB_HAS_GNU_PAR 1
+#else
+#define SB_HAS_GNU_PAR 0
+#endif
+#else
+#define SB_HAS_STD_PAR 0
+#define SB_HAS_GNU_PAR 0
+#endif
+
 #include <dlfcn.h>
 #include "../sortbench_plugin.h"
 
@@ -477,6 +511,18 @@ template <class T> static std::vector<AlgoT<T>> build_registry_t() {
   regs.push_back({"std_sort", [](auto &v) { std::sort(v.begin(), v.end()); }});
   regs.push_back({"std_stable_sort",
                   [](auto &v) { std::stable_sort(v.begin(), v.end()); }});
+#if SB_HAS_STD_PAR
+  regs.push_back({"std_sort_par", [](auto &v) {
+                    std::sort(std::execution::par, v.begin(), v.end());
+                  }});
+  regs.push_back({"std_sort_par_unseq", [](auto &v) {
+                    std::sort(std::execution::par_unseq, v.begin(), v.end());
+                  }});
+#endif
+#if SB_HAS_GNU_PAR
+  regs.push_back({"gnu_parallel_sort",
+                  [](auto &v) { __gnu_parallel::sort(v.begin(), v.end()); }});
+#endif
   regs.push_back({"heap_sort", [](auto &v) { algos::heap_sort(v); }});
   regs.push_back({"merge_sort_opt", [](auto &v) { algos::merge_sort_opt(v); }});
   regs.push_back({"timsort", [](auto &v) { algos::timsort(v); }});
@@ -488,6 +534,20 @@ template <class T> static std::vector<AlgoT<T>> build_registry_t() {
   }
 #if SB_HAS_PDQ
   regs.push_back({"pdqsort", [](auto &v) { pdqsort(v.begin(), v.end()); }});
+#endif
+  // Custom algorithms (if header available)
+#if SB_HAS_CUSTOM
+  if constexpr (std::is_same_v<T, int>) {
+    regs.push_back({"custom", [](auto &v) { custom_algo::sort_int(v); }});
+    regs.push_back({"customv2", [](auto &v) { custom_algo::sort_int_v2(v); }});
+  } else if constexpr (std::is_same_v<T, float>) {
+    regs.push_back({"custom", [](auto &v) { custom_algo::sort_float(v); }});
+    regs.push_back({"customv2", [](auto &v) { custom_algo::sort_float_v2(v); }});
+  } else {
+    // Provide safe fallbacks with same names for other types
+    regs.push_back({"custom", [](auto &v) { std::sort(v.begin(), v.end()); }});
+    regs.push_back({"customv2", [](auto &v) { std::sort(v.begin(), v.end()); }});
+  }
 #endif
   return regs;
 }

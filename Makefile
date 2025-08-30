@@ -3,12 +3,12 @@ CXX := g++
 CXXFLAGS := -O3 -march=native -pipe -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wno-sign-conversion -fopenmp
 LDFLAGS := -fopenmp -ltbb -ldl
 
-SRC := sortbench.cpp custom_algo_shim.cpp
+SRC := sortbench.cpp
 OBJ := $(SRC:.cpp=.o)
 
 # Core library (phase 1) — header-only public API + single core TU
 CORE_INC := include
-CORE_SRC := src/sortbench_core.cpp
+CORE_SRC := src/sortbench_core.cpp src/sortbench_format.cpp src/sortbench_capi.cpp custom_algo_shim.cpp
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 CORE_LIB := libsortbench_core.a
 
@@ -16,20 +16,29 @@ CORE_LIB := libsortbench_core.a
 
 all: $(TARGET) $(CORE_LIB)
 
-$(TARGET): $(OBJ)
-	$(CXX) $(CXXFLAGS) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -o $@ $^ $(LDFLAGS)
+$(TARGET): $(OBJ) $(CORE_LIB)
+	$(CXX) $(CXXFLAGS) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -o $@ $(OBJ) $(CORE_LIB) $(LDFLAGS)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -I$(CORE_INC) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -c -o $@ $<
 
-$(CORE_OBJ): $(CORE_SRC) include/sortbench/core.hpp
-	$(CXX) $(CXXFLAGS) -I$(CORE_INC) -c -o $@ $<
+
 
 $(CORE_LIB): $(CORE_OBJ)
 	ar rcs $@ $^
 
 run: $(TARGET)
 	./$(TARGET)
+
+# Tests
+.PHONY: test
+TEST_BIN := core_tests
+TEST_SRC := tests/core_tests.cpp
+$(TEST_BIN): $(CORE_LIB) $(TEST_SRC)
+	$(CXX) $(CXXFLAGS) -I$(CORE_INC) -o $@ $(TEST_SRC) $(CORE_LIB) $(LDFLAGS)
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
 
 PLUGIN_DIR := plugins
 PLUGIN_EXAMPLE := $(PLUGIN_DIR)/example_plugin.so

@@ -97,4 +97,16 @@ std::vector<std::string> list_algorithms(
 // Supported element types and distributions (metadata helpers)
 std::vector<ElemType> supported_types();
 
+// Formatting helpers (pure; no file I/O)
+std::string to_csv(const RunResult& r,
+                   bool with_header = true,
+                   bool include_speedup = false);
+
+std::string to_json(const RunResult& r,
+                    bool include_speedup = false,
+                    bool pretty = true);
+
+std::string to_jsonl(const RunResult& r,
+                     bool include_speedup = false);
+
 } // namespace sortbench

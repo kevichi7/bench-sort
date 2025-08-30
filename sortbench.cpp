@@ -43,6 +43,7 @@
 #endif
 
 #include "sortbench_plugin.h"
+#include "sortbench/core.hpp"
 
 #if defined(__has_include)
 #if __has_include("pdqsort.h")
@@ -1430,56 +1431,53 @@ static bool write_plot_dat_file(
   return true;
 }
 
-template <class T> static int run_for_type(const Options &opt_base) {
-  Options opt = opt_base;
-  // Configure thread limits if requested
-  if (opt.threads > 0) {
-#ifdef _OPENMP
-    omp_set_num_threads(opt.threads);
-#endif
-  }
-#if SORTBENCH_HAS_TBB_HEADER
-  std::unique_ptr<tbb::global_control> tbb_ctrl;
-  if (opt.threads > 0) {
-    tbb_ctrl = std::make_unique<tbb::global_control>(
-        tbb::global_control::max_allowed_parallelism,
-        static_cast<std::size_t>(opt.threads));
-  }
-#endif
-  auto regs = build_registry_t<T>();
-  std::vector<PluginHandle> plugin_handles;
-  if (!opt.plugin_paths.empty())
-    load_plugins_t<T>(opt.plugin_paths, regs, plugin_handles);
+template <class T> static int run_for_type(const Options &opt) {
+  // Discover-only mode
   if (opt.list) {
-    for (const auto &algo : regs) {
-      std::cout << algo.name << "\n";
-    }
+    sortbench::ElemType et;
+    if constexpr (std::is_same_v<T, int>) et = sortbench::ElemType::i32;
+    else if constexpr (std::is_same_v<T, unsigned int>) et = sortbench::ElemType::u32;
+    else if constexpr (std::is_same_v<T, long long>) et = sortbench::ElemType::i64;
+    else if constexpr (std::is_same_v<T, unsigned long long>) et = sortbench::ElemType::u64;
+    else if constexpr (std::is_same_v<T, float>) et = sortbench::ElemType::f32;
+    else if constexpr (std::is_same_v<T, double>) et = sortbench::ElemType::f64;
+    else et = sortbench::ElemType::str;
+    auto names = (opt.plugin_paths.empty()
+                      ? sortbench::list_algorithms(et)
+                      : sortbench::list_algorithms(et, opt.plugin_paths));
+    for (const auto &n : names) std::cout << n << "\n";
     return 0;
   }
 
-  std::mt19937_64 rng(opt.seed.value_or(default_seed()));
-  std::vector<T> original = make_data<T>(
-      opt.N, opt.dist, rng, opt.partial_shuffle_pct, opt.dup_values);
-  std::vector<T> work;
+  sortbench::CoreConfig cfg;
+  cfg.N = opt.N;
+  cfg.dist = static_cast<sortbench::Dist>(static_cast<int>(opt.dist));
+  if constexpr (std::is_same_v<T, int>) cfg.type = sortbench::ElemType::i32;
+  else if constexpr (std::is_same_v<T, unsigned int>) cfg.type = sortbench::ElemType::u32;
+  else if constexpr (std::is_same_v<T, long long>) cfg.type = sortbench::ElemType::i64;
+  else if constexpr (std::is_same_v<T, unsigned long long>) cfg.type = sortbench::ElemType::u64;
+  else if constexpr (std::is_same_v<T, float>) cfg.type = sortbench::ElemType::f32;
+  else if constexpr (std::is_same_v<T, double>) cfg.type = sortbench::ElemType::f64;
+  else cfg.type = sortbench::ElemType::str;
+  cfg.repeats = opt.repeats;
+  cfg.warmup = opt.warmup;
+  cfg.seed = opt.seed;
+  cfg.algos = opt.algos;
+  cfg.algo_regex = opt.algo_regex;
+  cfg.partial_shuffle_pct = opt.partial_shuffle_pct;
+  cfg.dup_values = opt.dup_values;
+  cfg.verify = opt.verify;
+  cfg.assert_sorted = opt.assert_sorted;
+  cfg.threads = opt.threads;
+  cfg.plugin_paths = opt.plugin_paths;
+  cfg.baseline = opt.baseline;
 
-  if (opt.verify) {
-    auto ref = original;
-    std::sort(ref.begin(), ref.end());
-    for (const auto &algo : regs) {
-      if (!name_selected(opt.algos, opt.algo_regex, algo.name))
-        continue;
-      work = original;
-      algo.run(work);
-      if (!std::is_sorted(work.begin(), work.end())) {
-        std::cerr << "Verification failed (not sorted): " << algo.name << "\n";
-        return 3;
-      }
-      if (work != ref) {
-        std::cerr << "Verification mismatch vs std::sort: " << algo.name
-                  << "\n";
-        return 3;
-      }
-    }
+  sortbench::RunResult r;
+  try {
+    r = sortbench::run_benchmark(cfg);
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << "\n";
+    return 2;
   }
 
   struct Row {
@@ -1494,49 +1492,11 @@ template <class T> static int run_for_type(const Options &opt_base) {
     double speedup; // vs baseline (filled later)
   };
   std::vector<Row> rows;
-  rows.reserve(regs.size());
-  for (const auto &algo : regs) {
-    if (!name_selected(opt.algos, opt.algo_regex, algo.name))
-      continue;
-#if !SORTBENCH_HAS_PDQ
-    if (algo.name == "pdqsort") {
-      std::cerr << "pdqsort requested but header not found; skipping.\n";
-      continue;
-    }
-#endif
-    // Warm-up runs (not included in timing stats)
-    for (int w = 0; w < opt.warmup; ++w) {
-      (void)benchmark_once_t<T>(algo.run, original, work, opt.assert_sorted,
-                                algo.name.c_str());
-    }
-    std::vector<double> times;
-    times.reserve(static_cast<std::size_t>(opt.repeats));
-    for (int rep = 0; rep < opt.repeats; ++rep)
-      times.push_back(benchmark_once_t<T>(
-          algo.run, original, work, opt.assert_sorted, algo.name.c_str()));
-    double med = median(times);
-    auto mm = std::minmax_element(times.begin(), times.end());
-    double tmin = (mm.first != times.end() ? *mm.first : med);
-    double tmax = (mm.second != times.end() ? *mm.second : med);
-    // mean and stddev
-    double sum = 0.0;
-    for (double x : times)
-      sum += x;
-    double mean =
-        (times.empty() ? med : sum / static_cast<double>(times.size()));
-    double var = 0.0;
-    if (times.size() >= 2) {
-      for (double x : times) {
-        double d = x - mean;
-        var += d * d;
-      }
-      var /= static_cast<double>(
-          times.size()); // population stddev (timing stability)
-    }
-    double sdev = (times.size() >= 2 ? std::sqrt(var) : 0.0);
-    rows.push_back(Row{algo.name, opt.N,
-                       std::string(kDistNames[static_cast<int>(opt.dist)]), med,
-                       tmin, tmax, mean, sdev, 1.0});
+  rows.reserve(r.rows.size());
+  for (const auto &rr : r.rows) {
+    rows.push_back(Row{rr.algo, r.N, r.dist, rr.stats.median_ms, rr.stats.min_ms,
+                       rr.stats.max_ms, rr.stats.mean_ms, rr.stats.stddev_ms,
+                       1.0});
   }
 
   // Compute baseline speedups and print winner summary
@@ -1589,23 +1549,8 @@ template <class T> static int run_for_type(const Options &opt_base) {
   }
 
   if (opt.format == OutFmt::csv) {
-    auto write_csv = [&](std::ostream &os, bool with_header) {
-      if (with_header) {
-        os << "algo,N,dist,median_ms,mean_ms,min_ms,max_ms,stddev_ms";
-        if (opt.baseline.has_value())
-          os << ",speedup_vs_baseline";
-        os << "\n";
-      }
-      for (const auto &r : rows) {
-        os << r.algo << ',' << r.N << ',' << r.dist << ',' << std::fixed
-           << std::setprecision(3) << r.t << ',' << r.tmean << ',' << r.tmin
-           << ',' << r.tmax << ',' << r.tstd;
-        if (opt.baseline.has_value())
-          os << ',' << std::setprecision(3) << r.speedup;
-        os << "\n";
-      }
-    };
-    write_csv(std::cout, opt.csv_header);
+    std::string csv = sortbench::to_csv(r, opt.csv_header, opt.baseline.has_value());
+    std::cout << csv;
     // Write to results file (unless suppressed)
     if (!opt.no_file) {
       namespace fs = std::filesystem;
@@ -1621,7 +1566,7 @@ template <class T> static int run_for_type(const Options &opt_base) {
         if (!rf) {
           std::cerr << "Failed to open results file: " << rp << "\n";
         } else {
-          write_csv(rf, opt.csv_header);
+          rf << csv;
         }
       }
     }
@@ -1642,64 +1587,12 @@ template <class T> static int run_for_type(const Options &opt_base) {
       if (!cf) {
         std::cerr << "Failed to open CSV file: " << csvp << "\n";
       } else {
-        write_csv(cf, true);
+        cf << sortbench::to_csv(r, true, opt.baseline.has_value());
       }
     }
   } else if (opt.format == OutFmt::json) {
-    auto esc = [](const std::string &s) {
-      std::string o;
-      o.reserve(s.size() + 8);
-      for (char c : s) {
-        switch (c) {
-        case '"':
-          o += "\\\"";
-          break;
-        case '\\':
-          o += "\\\\";
-          break;
-        case '\n':
-          o += "\\n";
-          break;
-        case '\r':
-          o += "\\r";
-          break;
-        case '\t':
-          o += "\\t";
-          break;
-        default:
-          if (static_cast<unsigned char>(c) < 0x20) {
-            char buf[7];
-            std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
-            o += buf;
-          } else {
-            o += c;
-          }
-        }
-      }
-      return o;
-    };
-    std::ostringstream js;
-    js << "[\n";
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-      const auto &r = rows[i];
-      js << "  {\"algo\":\"" << esc(r.algo) << "\",";
-      js << "\"N\":" << r.N << ",";
-      js << "\"dist\":\"" << esc(r.dist) << "\",";
-      js << std::fixed << std::setprecision(3);
-      js << "\"median_ms\":" << r.t << ",";
-      js << "\"mean_ms\":" << r.tmean << ",";
-      js << "\"min_ms\":" << r.tmin << ",";
-      js << "\"max_ms\":" << r.tmax << ",";
-      js << "\"stddev_ms\":" << r.tstd;
-      if (opt.baseline.has_value())
-        js << ",\"speedup_vs_baseline\":" << r.speedup;
-      js << "}";
-      if (i + 1 != rows.size())
-        js << ",";
-      js << "\n";
-    }
-    js << "]\n";
-    std::cout << js.str();
+    std::string js = sortbench::to_json(r, opt.baseline.has_value(), true);
+    std::cout << js;
     // Write JSON file (overwrite per run)
     if (!opt.no_file) {
       namespace fs = std::filesystem;
@@ -1713,59 +1606,12 @@ template <class T> static int run_for_type(const Options &opt_base) {
       if (!rf) {
         std::cerr << "Failed to open results file: " << rp << "\n";
       } else {
-        rf << js.str();
+        rf << js;
       }
     }
   } else if (opt.format == OutFmt::jsonl) {
-    auto esc = [](const std::string &s) {
-      std::string o;
-      o.reserve(s.size() + 8);
-      for (char c : s) {
-        switch (c) {
-        case '"':
-          o += "\\\"";
-          break;
-        case '\\':
-          o += "\\\\";
-          break;
-        case '\n':
-          o += "\\n";
-          break;
-        case '\r':
-          o += "\\r";
-          break;
-        case '\t':
-          o += "\\t";
-          break;
-        default:
-          if (static_cast<unsigned char>(c) < 0x20) {
-            char buf[7];
-            std::snprintf(buf, sizeof(buf), "\\u%04x", (int)(unsigned char)c);
-            o += buf;
-          } else {
-            o += c;
-          }
-        }
-      }
-      return o;
-    };
-    auto write_jsonl = [&](std::ostream &os) {
-      for (const auto &r : rows) {
-        os << '{' << "\"algo\":\"" << esc(r.algo) << "\","
-           << "\"N\":" << r.N << ","
-           << "\"dist\":\"" << esc(r.dist) << "\"," << std::fixed
-           << std::setprecision(3) << "\"median_ms\":" << r.t << ","
-           << "\"mean_ms\":" << r.tmean << ","
-           << "\"min_ms\":" << r.tmin << ","
-           << "\"max_ms\":" << r.tmax << ","
-           << "\"stddev_ms\":" << r.tstd;
-        if (opt.baseline.has_value())
-          os << ",\"speedup_vs_baseline\":" << r.speedup;
-        os << "}" << '\n';
-      }
-    };
-    // stdout
-    write_jsonl(std::cout);
+    std::string jsonl = sortbench::to_jsonl(r, opt.baseline.has_value());
+    std::cout << jsonl;
     // append to file
     if (!opt.no_file) {
       namespace fs = std::filesystem;
@@ -1779,7 +1625,7 @@ template <class T> static int run_for_type(const Options &opt_base) {
       if (!rf) {
         std::cerr << "Failed to open results file: " << rp << "\n";
       } else {
-        write_jsonl(rf);
+        rf << jsonl;
       }
     }
   } else {
@@ -1896,12 +1742,7 @@ template <class T> static int run_for_type(const Options &opt_base) {
     }
   }
 
-  if constexpr (std::is_same_v<T, int>) {
-    for (void *h : plugin_handles) {
-      if (h)
-        dlclose(h);
-    }
-  }
+  // plugin handles are managed inside the core library
   return 0;
 }
 

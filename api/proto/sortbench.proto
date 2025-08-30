@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package sortbench.v1;
+
+option go_package = "sortbench/api/gen;gen";
+
+enum ElemType {
+  ELEM_I32 = 0;
+  ELEM_U32 = 1;
+  ELEM_I64 = 2;
+  ELEM_U64 = 3;
+  ELEM_F32 = 4;
+  ELEM_F64 = 5;
+  ELEM_STR = 6;
+}
+
+enum Dist {
+  DIST_RANDOM = 0;
+  DIST_PARTIAL = 1;
+  DIST_DUPS = 2;
+  DIST_REVERSE = 3;
+  DIST_SORTED = 4;
+  DIST_SAW = 5;
+  DIST_RUNS = 6;
+  DIST_GAUSS = 7;
+  DIST_EXP = 8;
+  DIST_ZIPF = 9;
+}
+
+message MetaRequest {
+  repeated string plugin_paths = 1;
+}
+
+message MetaResponse {
+  repeated string types = 1;
+  repeated string dists = 2;
+  map<string, AlgoList> algos = 3; // key = type name
+}
+
+message AlgoList { repeated string names = 1; }
+
+message RunRequest {
+  uint64 N = 1;
+  Dist dist = 2;
+  ElemType type = 3;
+  int32 repeats = 4;
+  int32 warmup = 5;
+  optional uint64 seed = 6;
+  repeated string algos = 7;
+  int32 threads = 8;
+  bool assert_sorted = 9;
+  optional string baseline = 10;
+  int32 partial_shuffle_pct = 11;
+  int32 dup_values = 12;
+  repeated string plugin_paths = 13;
+}
+
+message TimingStats {
+  double median_ms = 1;
+  double mean_ms = 2;
+  double min_ms = 3;
+  double max_ms = 4;
+  double stddev_ms = 5;
+}
+
+message ResultRow {
+  string algo = 1;
+  uint64 N = 2;
+  string dist = 3;
+  TimingStats stats = 4;
+  double speedup_vs_baseline = 5;
+}
+
+message RunResult {
+  ElemType type = 1;
+  uint64 N = 2;
+  string dist = 3;
+  int32 repeats = 4;
+  optional uint64 seed = 5;
+  optional string baseline = 6;
+  repeated ResultRow rows = 7;
+}
+
+message Empty {}
+
+service SortBench {
+  rpc GetMeta(MetaRequest) returns (MetaResponse);
+  rpc Run (RunRequest) returns (RunResult);
+  // Optional: stream progress/results as they complete
+  // rpc RunStream (RunRequest) returns (stream ResultRow);
+}
+
