@@ -22,5 +22,5 @@ jobs:
       - name: Build Go API (cgo)
         run: |
           cd api/go
+          go mod tidy
           SORTBENCH_CGO=1 go build .
-

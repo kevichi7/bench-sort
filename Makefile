@@ -40,6 +40,14 @@ $(TEST_BIN): $(CORE_LIB) $(TEST_SRC)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
+# Go API helpers
+.PHONY: api-go api-go-cgo
+api-go:
+	cd api/go && go mod tidy && go build .
+
+api-go-cgo:
+	cd api/go && SORTBENCH_CGO=1 go mod tidy && go build .
+
 PLUGIN_DIR := plugins
 PLUGIN_EXAMPLE := $(PLUGIN_DIR)/example_plugin.so
 PLUGIN_CUSTOM := $(PLUGIN_DIR)/custom_cpp25.so

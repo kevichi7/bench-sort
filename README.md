@@ -1,6 +1,10 @@
-# sortbench — Sorting Algorithm Benchmark CLI
+# sortbench — Sorting Algorithm Benchmark (CLI + API)
 
-sortbench is a self‑contained CLI to benchmark sorting algorithms across data sizes, element types, and input distributions. It prints results (median/mean/min/max/stddev), can render plots via gnuplot, and supports runtime‑loadable plugins (with multi‑type ABI).
+sortbench is a high‑performance sorting benchmark with:
+- A self‑contained C++ CLI for benchmarking algorithms across sizes, element types, and input distributions.
+- A reusable C++ core library used by the CLI and server.
+- An optional Go HTTP API (shell‑out or cgo) exposing sync and async benchmarking endpoints.
+It reports per‑run stats (median/mean/min/max/stddev), can render plots via gnuplot, and supports runtime‑loadable plugins (multi‑type ABI).
 
 ## Features
 
@@ -18,6 +22,15 @@ Requirements: `g++` (C++20), OpenMP, `libtbb`/`dl`, optional gnuplot for plottin
 ```
 make            # build sortbench
 make plugins    # build example plugins
+
+# Build + run the Go API (shell-out mode)
+make api-go     # (cd api/go && go mod tidy && go build .)
+PORT=8080 api/go/sortbench-api   # or: cd api/go && go run .
+
+# Build + run the Go API (cgo mode; calls core directly)
+make            # builds libsortbench_core.a
+make api-go-cgo
+PORT=8080 SORTBENCH_CGO=1 api/go/sortbench-api
 ```
 
 Print the compiler flags used by the build:
@@ -188,12 +201,105 @@ Header: `sortbench_plugin.h`.
 
 The loader prefers v2 and registers only entrypoints matching the current element type `--type`. If v2 is absent, it falls back to v1 for `i32`.
 
+---
+
+# Core library and Go API
+
+## Core library
+
+The CLI is now a thin wrapper over `libsortbench_core.a`.
+
+Public headers:
+- `include/sortbench/core.hpp` — Core API (`CoreConfig`, `RunResult`, `run_benchmark`, `list_algorithms`, `to_json`, `to_csv`, `to_jsonl`).
+- `include/sortbench/capi.h` — Minimal C ABI for cgo/FFI (`sb_run_json`, `sb_list_algos_json`).
+
+Linking example (C++):
+```
+#include "sortbench/core.hpp"
+
+int main() {
+  sortbench::CoreConfig cfg;
+  cfg.N = 1'000'000; cfg.type = sortbench::ElemType::i32; cfg.dist = sortbench::Dist::runs;
+  cfg.repeats = 3; cfg.algos = {"std_sort", "timsort"};
+  auto res = sortbench::run_benchmark(cfg);
+  std::string json = sortbench::to_json(res, /*include_speedup=*/false, /*pretty=*/true);
+  // ...
+}
+```
+
+## Go HTTP API
+
+Two execution modes:
+- Shell‑out (default): API spawns `./sortbench --format json ...` per request.
+- cgo (set `SORTBENCH_CGO=1`): API calls the C++ core in‑process via a small C layer.
+
+Endpoints:
+- `GET /healthz` — liveness.
+- `GET /readyz` — readiness (algo discovery + tiny smoke run).
+- `GET /metrics` — Prometheus metrics.
+- `GET /meta` — returns supported types, dists, and available algos per type (optionally with `?plugin=...`).
+- `POST /run` — sync run. Body (JSON): `{ N, dist, type, repeats?, warmup?, seed?, algos?, threads?, assert_sorted?, baseline?, plugins?, timeout_ms? }`. Returns array of rows (median/mean/min/max/stddev).
+- `POST /jobs` — async run. Returns `{ job_id }`.
+- `GET /jobs/{id}` — job status/result.
+- `POST /jobs/{id}/cancel` — cancel a running job.
+
+Examples:
+```
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+curl http://localhost:8080/meta | jq
+curl -X POST http://localhost:8080/run \
+  -H 'Content-Type: application/json' \
+  -d '{"N":100000,"dist":"runs","type":"f32","repeats":2,"algos":["std_sort","timsort"],"assert_sorted":true}' | jq
+
+curl -X POST http://localhost:8080/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"N":1000000,"dist":"runs","type":"i32","repeats":3,"algos":["std_sort","timsort"]}'
+curl http://localhost:8080/jobs/<job_id> | jq
+```
+
+### Metrics
+
+Prometheus at `/metrics`, including:
+- `sortbench_requests_total{route,status}`
+- `sortbench_request_duration_seconds{route}`
+- `sortbench_jobs_running` (gauge)
+- `sortbench_jobs_submitted_total`
+- `sortbench_jobs_completed_total{result=done|failed|canceled}`
+
+### Limits and configuration
+
+The API enforces caps; all configurable via env vars (defaults in parentheses):
+- `MAX_N` (10_000_000)
+- `MAX_REPEATS` (50)
+- `MAX_THREADS` (0 = unlimited)
+- `MAX_JOBS` (64)
+- `TIMEOUT_MS` (120000)
+- `PORT` (8080)
+- `SORTBENCH_BIN` (path to CLI for shell‑out mode)
+- `SORTBENCH_CGO` (set to `1` to use in‑process core)
+
+### Docker
+
+Multi‑stage image builds the core + Go API (cgo mode) and runs as a small Debian base:
+
+```
+docker build -t sortbench-api .
+docker run --rm -p 8080:8080 -e SORTBENCH_CGO=1 sortbench-api
+```
+
+### CI
+
+GitHub Actions workflow builds the core, runs C++ core tests, and builds the Go API.
+
+---
+
 ## Full flag reference
 
 - `--N size|start-end`
 - `--dist random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf` (repeatable or comma‑list)
 - `--repeat K`, `--warmup W`, `--seed S`
-- `--algo name[,name...]`, `--algo-re REGEX[,REGEX...]`
+- `--algo name,name...`, `--algo-re REGEX,REGEX...`
 - `--type i32|u32|i64|u64|f32|f64|str`
 - `--format csv|table|json|jsonl`, `--no-header`, `--results PATH`
 - `--verify`, `--assert-sorted`
@@ -204,6 +310,15 @@ The loader prefers v2 and registers only entrypoints matching the current elemen
 - `--init-plugin [path.cpp]`
 - `--plot out.png|.jpg`, `--plot-title T`, `--plot-size WxH`, `--plot-style boxes|lines`, `--plot-layout RxC`, `--keep-plot-artifacts`
 
+## Custom algorithms shim (optional)
+
+The static core library can optionally include a custom algorithm shim. This requires sources that are not part of this repo. To enable locally:
+
+```
+make ENABLE_CUSTOM_SHIM=1
+```
+
+This defines `SORTBENCH_HAS_CUSTOM_SHIM` and includes `custom_algo_shim.cpp`, registering `custom`/`customv2` for `i32`/`f32` where supported. CI and default builds do not include the shim.
 ## Notes
 
 - Plotting requires gnuplot in PATH. CSV/JSON/JSONL outputs work without it.

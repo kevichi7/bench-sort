@@ -23,6 +23,8 @@ var (
     defaultSortbench = "./sortbench"
     maxN             = int64(10_000_000) // cap requests
     maxRepeats       = 50
+    maxThreads       = 0   // 0 = unlimited
+    maxJobs          = 64  // concurrent async jobs cap
     defaultTimeout   = 2 * time.Minute
 )
 
@@ -331,14 +333,17 @@ func cancelJobHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func validate(req *RunRequest) error {
-	if req.N <= 0 || req.N > maxN {
-		return fmt.Errorf("N must be in [1,%d]", maxN)
-	}
-	if req.Repeats < 0 || req.Repeats > maxRepeats {
-		return fmt.Errorf("repeats must be in [0,%d]", maxRepeats)
-	}
-	// Dist/type membership
-	okDist := false
+    if req.N <= 0 || req.N > maxN {
+        return fmt.Errorf("N must be in [1,%d]", maxN)
+    }
+    if req.Repeats < 0 || req.Repeats > maxRepeats {
+        return fmt.Errorf("repeats must be in [0,%d]", maxRepeats)
+    }
+    if maxThreads > 0 && req.Threads > maxThreads {
+        return fmt.Errorf("threads must be <= %d", maxThreads)
+    }
+    // Dist/type membership
+    okDist := false
 	for _, d := range dists() {
 		if d == req.Dist {
 			okDist = true
@@ -395,18 +400,67 @@ func buildArgs(req *RunRequest) []string {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(200)
-	_, _ = w.Write([]byte("ok"))
+    w.WriteHeader(200)
+    _, _ = w.Write([]byte("ok"))
+}
+
+// readyz: ensure discovery and tiny smoke run succeed
+func readyHandler(w http.ResponseWriter, r *http.Request) {
+    // quick algo discovery for i32
+    if os.Getenv("SORTBENCH_CGO") == "1" {
+        if _, err := listAlgosCGO("i32", nil); err != nil {
+            writeJSON(w, 500, errorResp{Error: "algo discovery failed: " + err.Error()})
+            return
+        }
+    } else {
+        if _, err := listAlgos("i32", nil); err != nil {
+            writeJSON(w, 500, errorResp{Error: "algo discovery failed: " + err.Error()})
+            return
+        }
+    }
+    // tiny smoke run
+    req := RunRequest{N: 256, Dist: "runs", Type: "i32", Repeats: 1, Algos: []string{"std_sort"}, TimeoutMs: 5000}
+    if os.Getenv("SORTBENCH_CGO") == "1" {
+        if _, err := runCGO(req); err != nil {
+            writeJSON(w, 500, errorResp{Error: "smoke run failed: " + err.Error()})
+            return
+        }
+    } else {
+        ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+        defer cancel()
+        args := buildArgs(&req)
+        cmd := exec.CommandContext(ctx, sbPath(), args...)
+        if _, err := cmd.Output(); err != nil {
+            writeJSON(w, 500, errorResp{Error: "smoke run failed"})
+            return
+        }
+    }
+    w.WriteHeader(200)
+    _, _ = w.Write([]byte("ready"))
 }
 
 func main() {
     mux := http.NewServeMux()
     mux.Handle("/metrics", promhttp.Handler())
     mux.Handle("/healthz", withMetrics("healthz", healthHandler))
+    mux.Handle("/readyz", withMetrics("readyz", readyHandler))
     mux.Handle("/meta", withMetrics("meta", metaHandler))
     mux.Handle("/run", withMetrics("run", runHandler))
     mux.Handle("/jobs", withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
         if r.Method == http.MethodPost {
+            // enforce max jobs cap
+            if maxJobs > 0 {
+                active := 0
+                for _, j := range jobs.m {
+                    if j.Status == JobPending || j.Status == JobRunning {
+                        active++
+                    }
+                }
+                if active >= maxJobs {
+                    writeJSON(w, 429, errorResp{Error: "too many jobs"})
+                    return
+                }
+            }
             submitJobHandler(w, r)
             return
         }
@@ -423,10 +477,27 @@ func main() {
         }
         w.WriteHeader(405)
     }))
+    // Optional env config caps
+    if v := os.Getenv("MAX_N"); v != "" {
+        if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 { maxN = n }
+    }
+    if v := os.Getenv("MAX_REPEATS"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n >= 0 { maxRepeats = n }
+    }
+    if v := os.Getenv("MAX_THREADS"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n >= 0 { maxThreads = n }
+    }
+    if v := os.Getenv("MAX_JOBS"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n >= 0 { maxJobs = n }
+    }
+    if v := os.Getenv("TIMEOUT_MS"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 { defaultTimeout = time.Duration(n) * time.Millisecond }
+    }
+
     addr := ":8080"
-	if v := os.Getenv("PORT"); v != "" {
-		addr = ":" + v
-	}
+    if v := os.Getenv("PORT"); v != "" {
+        addr = ":" + v
+    }
 	log.Printf("sortbench API listening on %s (bin=%s)", addr, sbPath())
 	srv := &http.Server{Addr: addr, Handler: mux}
 	log.Fatal(srv.ListenAndServe())
