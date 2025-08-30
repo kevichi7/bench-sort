@@ -50,19 +50,23 @@
 #define SB_HAS_PDQ 0
 #endif
 
-// Optional custom algo header (try both src-relative and project-root paths)
-#if defined(__has_include)
-#if __has_include("../custom_algo.hpp")
-#include "../custom_algo.hpp"
-#define SB_HAS_CUSTOM 1
-#elif __has_include("custom_algo.hpp")
-#include "custom_algo.hpp"
-#define SB_HAS_CUSTOM 1
+// Optional custom algos: only enable if shim is compiled in (provides symbols)
+#if defined(SORTBENCH_HAS_CUSTOM_SHIM)
+  #if defined(__has_include)
+    #if __has_include("../custom_algo.hpp")
+      #include "../custom_algo.hpp"
+      #define SB_HAS_CUSTOM 1
+    #elif __has_include("custom_algo.hpp")
+      #include "custom_algo.hpp"
+      #define SB_HAS_CUSTOM 1
+    #else
+      #define SB_HAS_CUSTOM 0
+    #endif
+  #else
+    #define SB_HAS_CUSTOM 0
+  #endif
 #else
-#define SB_HAS_CUSTOM 0
-#endif
-#else
-#define SB_HAS_CUSTOM 0
+  #define SB_HAS_CUSTOM 0
 #endif
 
 // Optional parallel headers

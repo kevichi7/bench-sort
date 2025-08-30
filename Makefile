@@ -8,7 +8,7 @@ OBJ := $(SRC:.cpp=.o)
 
 # Core library (phase 1) — header-only public API + single core TU
 CORE_INC := include
-CORE_SRC := src/sortbench_core.cpp src/sortbench_format.cpp src/sortbench_capi.cpp custom_algo_shim.cpp
+CORE_SRC := src/sortbench_core.cpp src/sortbench_format.cpp src/sortbench_capi.cpp
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 CORE_LIB := libsortbench_core.a
 
@@ -55,3 +55,11 @@ $(PLUGIN_DIR)/custom_cpp25.so: $(PLUGIN_DIR)/custom_cpp25.cpp sortbench_plugin.h
 
 clean:
 	rm -f $(OBJ) $(TARGET) $(CORE_OBJ) $(CORE_LIB)
+
+# Optional: include custom shim when available and explicitly enabled
+# Usage: make ENABLE_CUSTOM_SHIM=1
+ifneq ($(ENABLE_CUSTOM_SHIM),)
+CORE_SRC += custom_algo_shim.cpp
+CORE_OBJ += custom_algo_shim.o
+CXXFLAGS += -DSORTBENCH_HAS_CUSTOM_SHIM=1
+endif
