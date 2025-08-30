@@ -1,25 +1,38 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
-	"time"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "os/exec"
+    "strconv"
+    "strings"
+    "time"
+
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promauto"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Basic config and defaults
 var (
-	defaultSortbench = "./sortbench"
-	maxN             = int64(10_000_000) // cap requests
-	maxRepeats       = 50
-	defaultTimeout   = 2 * time.Minute
+    defaultSortbench = "./sortbench"
+    maxN             = int64(10_000_000) // cap requests
+    maxRepeats       = 50
+    defaultTimeout   = 2 * time.Minute
+)
+
+// Prometheus metrics
+var (
+    reqTotal    = promauto.NewCounterVec(prometheus.CounterOpts{Name: "sortbench_requests_total", Help: "Total HTTP requests"}, []string{"route", "status"})
+    reqDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "sortbench_request_duration_seconds", Help: "HTTP request duration in seconds", Buckets: prometheus.DefBuckets}, []string{"route"})
+    jobsRunningGauge = promauto.NewGauge(prometheus.GaugeOpts{Name: "sortbench_jobs_running", Help: "Number of running async jobs"})
+    jobsSubmitted    = promauto.NewCounter(prometheus.CounterOpts{Name: "sortbench_jobs_submitted_total", Help: "Total async jobs submitted"})
+    jobsCompleted    = promauto.NewCounterVec(prometheus.CounterOpts{Name: "sortbench_jobs_completed_total", Help: "Total async jobs completed by result"}, []string{"result"})
 )
 
 type MetaResponse struct {
@@ -174,6 +187,20 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// metrics wrapper
+type statusRecorder struct { http.ResponseWriter; code int }
+func (sr *statusRecorder) WriteHeader(c int) { sr.code = c; sr.ResponseWriter.WriteHeader(c) }
+
+func withMetrics(route string, h func(http.ResponseWriter, *http.Request)) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        rec := &statusRecorder{ResponseWriter: w, code: 200}
+        h(rec, r)
+        reqTotal.WithLabelValues(route, strconv.Itoa(rec.code)).Inc()
+        reqDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+    })
+}
+
 // =============== Async Jobs ===============
 
 type JobStatus string
@@ -228,12 +255,14 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 	id := genID()
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	job := &Job{ID: id, Status: JobPending, CreatedAt: time.Now(), cancel: cancel}
-	jobs.create(job)
-	go func() {
-		job.Status = JobRunning
-		job.StartedAt = time.Now()
-		var out []byte
-		var err error
+    jobs.create(job)
+    jobsSubmitted.Inc()
+    go func() {
+        job.Status = JobRunning
+        job.StartedAt = time.Now()
+        jobsRunningGauge.Inc()
+        var out []byte
+        var err error
 		if os.Getenv("SORTBENCH_CGO") == "1" {
 			out, err = runCGO(req)
 		} else {
@@ -247,22 +276,26 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		job.FinishedAt = time.Now()
-		job.DurationMs = job.FinishedAt.Sub(job.StartedAt).Milliseconds()
-		if err != nil {
-			if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
-				job.Status = JobCanceled
-				job.Error = ctx.Err().Error()
-			} else {
-				job.Status = JobFailed
-				job.Error = err.Error()
-			}
-			return
-		}
-		job.ResultJSON = json.RawMessage(out)
-		job.Status = JobDone
-	}()
-	writeJSON(w, 202, map[string]string{"job_id": id})
+        job.FinishedAt = time.Now()
+        job.DurationMs = job.FinishedAt.Sub(job.StartedAt).Milliseconds()
+        defer jobsRunningGauge.Dec()
+        if err != nil {
+            if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
+                job.Status = JobCanceled
+                job.Error = ctx.Err().Error()
+                jobsCompleted.WithLabelValues("canceled").Inc()
+            } else {
+                job.Status = JobFailed
+                job.Error = err.Error()
+                jobsCompleted.WithLabelValues("failed").Inc()
+            }
+            return
+        }
+        job.ResultJSON = json.RawMessage(out)
+        job.Status = JobDone
+        jobsCompleted.WithLabelValues("done").Inc()
+    }()
+    writeJSON(w, 202, map[string]string{"job_id": id})
 }
 
 // GET /jobs/{id}
@@ -367,29 +400,30 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/meta", metaHandler)
-	mux.HandleFunc("/run", runHandler)
-	mux.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			submitJobHandler(w, r)
-			return
-		}
-		w.WriteHeader(405)
-	})
-	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
-			cancelJobHandler(w, r)
-			return
-		}
-		if r.Method == http.MethodGet {
-			getJobHandler(w, r)
-			return
-		}
-		w.WriteHeader(405)
-	})
-	addr := ":8080"
+    mux := http.NewServeMux()
+    mux.Handle("/metrics", promhttp.Handler())
+    mux.Handle("/healthz", withMetrics("healthz", healthHandler))
+    mux.Handle("/meta", withMetrics("meta", metaHandler))
+    mux.Handle("/run", withMetrics("run", runHandler))
+    mux.Handle("/jobs", withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodPost {
+            submitJobHandler(w, r)
+            return
+        }
+        w.WriteHeader(405)
+    }))
+    mux.Handle("/jobs/", withMetrics("jobs_item", func(w http.ResponseWriter, r *http.Request) {
+        if strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
+            cancelJobHandler(w, r)
+            return
+        }
+        if r.Method == http.MethodGet {
+            getJobHandler(w, r)
+            return
+        }
+        w.WriteHeader(405)
+    }))
+    addr := ":8080"
 	if v := os.Getenv("PORT"); v != "" {
 		addr = ":" + v
 	}
