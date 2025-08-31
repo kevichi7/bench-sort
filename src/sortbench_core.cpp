@@ -742,6 +742,18 @@ static bool name_selected(const std::vector<std::string> &selected,
   return false;
 }
 
+static bool name_excluded(const std::vector<std::string> &excluded,
+                          const std::vector<std::regex> &excluded_re,
+                          const std::string &name) {
+  if (excluded.empty() && excluded_re.empty()) return false;
+  std::string ln = to_lower(name);
+  for (const auto &s : excluded) if (s == ln) return true;
+  for (const auto &re : excluded_re) {
+    if (std::regex_search(name, re) || std::regex_search(ln, re)) return true;
+  }
+  return false;
+}
+
 template <class T>
 static double benchmark_once_t(const std::function<void(std::vector<T> &)> &fn,
                                const std::vector<T> &original,
@@ -813,6 +825,8 @@ template <class T> static RunResult run_for_type_core(const CoreConfig &cfg) {
     for (const auto &algo : regs) {
       if (!name_selected(cfg.algos, cfg.algo_regex, algo.name))
         continue;
+      if (name_excluded(cfg.exclude_algos, cfg.exclude_regex, algo.name))
+        continue;
       work = original;
       algo.run(work);
       if (!std::is_sorted(work.begin(), work.end()))
@@ -836,6 +850,8 @@ template <class T> static RunResult run_for_type_core(const CoreConfig &cfg) {
 
   for (const auto &algo : regs) {
     if (!name_selected(cfg.algos, cfg.algo_regex, algo.name))
+      continue;
+    if (name_excluded(cfg.exclude_algos, cfg.exclude_regex, algo.name))
       continue;
     for (int w = 0; w < cfg.warmup; ++w) {
       (void)benchmark_once_t<T>(algo.run, original, work, cfg.assert_sorted,

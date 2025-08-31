@@ -48,6 +48,9 @@ struct CoreConfig {
   std::optional<std::uint64_t> seed;     // fixed default if not set
   std::vector<std::string> algos;        // exact names (empty = all)
   std::vector<std::regex> algo_regex;    // optional regex filters
+  // Exclusions (applied after inclusion filters)
+  std::vector<std::string> exclude_algos;     // exact names to exclude
+  std::vector<std::regex> exclude_regex;      // regex filters to exclude
   int partial_shuffle_pct = 10;          // for Dist::partial
   int dup_values = 100;                  // for Dist::dups/zipf
   bool verify = false;                   // verify vs std::sort

@@ -168,6 +168,8 @@ struct Options {
   bool assert_sorted = false; // assert results are sorted after each run
   int threads = 0;            // max threads (0 = default)
   std::vector<std::regex> algo_regex; // optional regex filters for algo names
+  std::vector<std::string> exclude_algos; // exact names to exclude
+  std::vector<std::regex> exclude_regex;  // regex exclusions
   bool multi_plot_accumulate =
       false; // internal: accumulate plot data, no gnuplot per call
   std::optional<std::string>
@@ -261,7 +263,7 @@ static void print_usage(const char *argv0) {
                "[--no-header] "
                "[--verify]"
                " [--partial-pct p] [--dups-k k] [--list] [--plugin lib.so ...] "
-               "[--format csv|table|json|jsonl] [--algo-re REGEX] [--threads "
+               "[--format csv|table|json|jsonl] [--algo-re REGEX] [--exclude name[,name...]] [--threads "
                "K] [--results PATH] [--init-plugin [path.cpp]]\n";
   std::cerr << "       --dist can be repeated or take multiple values (e.g., "
                "--dist random dups or --dist=random,dups)\n";
@@ -400,6 +402,15 @@ static Options parse_args(int argc, char **argv) {
       }
       if (!cur.empty())
         opt.algos.push_back(to_lower(cur));
+    } else if (a == "--exclude" || a.rfind("--exclude=", 0) == 0) {
+      std::string v = get_value_inline(a, "--exclude").value_or(need_value(a));
+      std::string cur;
+      for (char c : v) {
+        if (c == ',') {
+          if (!cur.empty()) { opt.exclude_algos.push_back(to_lower(cur)); cur.clear(); }
+        } else cur.push_back(c);
+      }
+      if (!cur.empty()) opt.exclude_algos.push_back(to_lower(cur));
     } else if (a == "--seed" || a.rfind("--seed=", 0) == 0) {
       std::string v = get_value_inline(a, "--seed").value_or(need_value(a));
       opt.seed = std::stoull(v);
@@ -569,6 +580,20 @@ static Options parse_args(int argc, char **argv) {
           break;
         else
           start = pos + 1;
+      }
+    } else if (a == "--exclude-re" || a.rfind("--exclude-re=", 0) == 0) {
+      std::string v = get_value_inline(a, "--exclude-re").value_or(need_value(a));
+      size_t start = 0;
+      while (start <= v.size()) {
+        size_t pos = v.find(',', start);
+        std::string pat = v.substr(start, pos == std::string::npos ? std::string::npos : pos - start);
+        if (!pat.empty()) {
+          try { opt.exclude_regex.emplace_back(pat, std::regex::icase); }
+          catch (const std::regex_error &) {
+            throw std::runtime_error(std::string("Invalid --exclude-re regex: ") + pat);
+          }
+        }
+        if (pos == std::string::npos) break; else start = pos + 1;
       }
     } else if (a == "--assert-sorted") {
       opt.assert_sorted = true;
@@ -1596,6 +1621,8 @@ template <class T> static int run_for_type(const Options &opt) {
   cfg.seed = opt.seed;
   cfg.algos = opt.algos;
   cfg.algo_regex = opt.algo_regex;
+  cfg.exclude_algos = opt.exclude_algos;
+  cfg.exclude_regex = opt.exclude_regex;
   cfg.partial_shuffle_pct = opt.partial_shuffle_pct;
   cfg.dup_values = opt.dup_values;
   cfg.verify = opt.verify;

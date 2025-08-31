@@ -615,6 +615,15 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
                 "duration_ms": j.DurationMs.Int64,
             })
             return
+        } else {
+            // Be tolerant during immediate post-submit polls: if the row is not
+            // yet visible for any reason, return a non-error pending status so
+            // callers using retry loops don't fail on a transient 404.
+            writeJSON(w, 200, map[string]any{
+                "id": id,
+                "status": "pending",
+            })
+            return
         }
     }
     if j, ok := jobs.get(id); ok {
