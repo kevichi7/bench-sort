@@ -48,7 +48,7 @@ jobs:
           curl -fsS http://localhost:${PORT}/meta | jq -e '.dists | index("runs_ht")'
           # run small
           curl -fsS -X POST http://localhost:${PORT}/run -H 'Content-Type: application/json' \
-            -d '{"N":256,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"],"assert_sorted":true}' | jq -e '.rows | length >= 1'
+            -d '{"N":256,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"],"assert_sorted":true}' | jq -e 'type=="array" and length >= 1'
           # jobs submit + poll
           JOB_ID=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' \
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
