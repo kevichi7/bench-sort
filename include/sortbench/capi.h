@@ -51,6 +51,9 @@ typedef struct sb_core_config {
   int has_baseline;
   int partial_shuffle_pct;
   int dup_values;
+  double zipf_s;
+  double runs_alpha;
+  int stagger_block;
   const char** plugin_paths;
   int plugin_len;
 } sb_core_config;

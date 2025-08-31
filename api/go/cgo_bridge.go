@@ -157,32 +157,41 @@ func runCGO(req RunRequest) ([]byte, error) {
 		defer C.free(unsafe.Pointer(cbase))
 		hasBase = 1
 	}
-	cfg := C.sb_core_config{
-		N:                   C.uint64_t(req.N),
-		dist:                C.int(dcode),
-		elem_type:           C.int(tcode),
-		repeats:             C.int(req.Repeats),
-		warmup:              C.int(req.Warmup),
-		seed:                cseed,
-		has_seed:            hasSeed,
-		algos:               (**C.char)(nil),
-		algos_len:           C.int(len(req.Algos)),
-		threads:             C.int(req.Threads),
-		assert_sorted:       C.int(boolToInt(req.Assert)),
-		verify:              0,
-		baseline:            cbase,
-		has_baseline:        hasBase,
-		partial_shuffle_pct: C.int(10),
-		dup_values:          C.int(100),
-		plugin_paths:        (**C.char)(nil),
-		plugin_len:          C.int(len(req.Plugins)),
-	}
+    cfg := C.sb_core_config{
+        N:                   C.uint64_t(req.N),
+        dist:                C.int(dcode),
+        elem_type:           C.int(tcode),
+        repeats:             C.int(req.Repeats),
+        warmup:              C.int(req.Warmup),
+        seed:                cseed,
+        has_seed:            hasSeed,
+        algos:               (**C.char)(nil),
+        algos_len:           C.int(len(req.Algos)),
+        threads:             C.int(req.Threads),
+        assert_sorted:       C.int(boolToInt(req.Assert)),
+        verify:              0,
+        baseline:            cbase,
+        has_baseline:        hasBase,
+        partial_shuffle_pct: C.int(10),
+        dup_values:          C.int(100),
+        zipf_s:              C.double(0),
+        runs_alpha:          C.double(0),
+        stagger_block:       C.int(0),
+        plugin_paths:        (**C.char)(nil),
+        plugin_len:          C.int(len(req.Plugins)),
+    }
 	if cAlgosArr != nil {
 		cfg.algos = cAlgosArr
 	}
-	if cPluginsArr != nil {
-		cfg.plugin_paths = cPluginsArr
-	}
+    if cPluginsArr != nil {
+        cfg.plugin_paths = cPluginsArr
+    }
+    // Override defaults with provided values when >0
+    if req.PartialPct > 0 { cfg.partial_shuffle_pct = C.int(req.PartialPct) }
+    if req.DupValues > 0 { cfg.dup_values = C.int(req.DupValues) }
+    if req.ZipfS > 0 { cfg.zipf_s = C.double(req.ZipfS) }
+    if req.RunsAlpha > 0 { cfg.runs_alpha = C.double(req.RunsAlpha) }
+    if req.StaggerBlock > 0 { cfg.stagger_block = C.int(req.StaggerBlock) }
 	var errOut *C.char
 	out := C.sb_run_json(&cfg, 0, 1, &errOut)
 	if out == nil {

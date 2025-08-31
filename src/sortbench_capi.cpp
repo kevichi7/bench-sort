@@ -35,6 +35,9 @@ extern "C" char* sb_run_json(const sb_core_config* c, int include_speedup, int p
     if (c->has_baseline && c->baseline) cfg.baseline = std::string(c->baseline);
     cfg.partial_shuffle_pct = c->partial_shuffle_pct;
     cfg.dup_values = c->dup_values;
+    if (c->zipf_s > 0) cfg.zipf_s = c->zipf_s;
+    if (c->runs_alpha > 0) cfg.runs_alpha = c->runs_alpha;
+    if (c->stagger_block > 0) cfg.stagger_block = c->stagger_block;
     cfg.plugin_paths.clear();
     for (int i = 0; i < c->plugin_len; ++i) if (c->plugin_paths && c->plugin_paths[i]) cfg.plugin_paths.emplace_back(c->plugin_paths[i]);
 
@@ -79,4 +82,3 @@ extern "C" char* sb_list_algos_json(int elem_type, const char* const* plugins, i
 extern "C" void sb_free(char* p) {
   if (p) std::free(p);
 }
-

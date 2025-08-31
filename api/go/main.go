@@ -8,6 +8,7 @@ import (
     "log/slog"
     "log"
     "net/http"
+    "net"
     "os"
     "os/exec"
     "os/signal"
@@ -43,25 +44,31 @@ var (
 )
 
 type MetaResponse struct {
-	Types []string            `json:"types"`
-	Dists []string            `json:"dists"`
-	Algos map[string][]string `json:"algos"` // by type
+    Types []string            `json:"types"`
+    Dists []string            `json:"dists"`
+    Algos map[string][]string `json:"algos"` // by type
 }
 
 // Run request payload
 type RunRequest struct {
-	N         int64    `json:"N"`
-	Dist      string   `json:"dist"`
-	Type      string   `json:"type"`
-	Repeats   int      `json:"repeats,omitempty"`
-	Warmup    int      `json:"warmup,omitempty"`
-	Seed      *uint64  `json:"seed,omitempty"`
-	Algos     []string `json:"algos,omitempty"`
-	Threads   int      `json:"threads,omitempty"`
-	Assert    bool     `json:"assert_sorted,omitempty"`
-	Baseline  *string  `json:"baseline,omitempty"`
-	Plugins   []string `json:"plugins,omitempty"`
-	TimeoutMs int      `json:"timeout_ms,omitempty"`
+    N         int64    `json:"N"`
+    Dist      string   `json:"dist"`
+    Type      string   `json:"type"`
+    Repeats   int      `json:"repeats,omitempty"`
+    Warmup    int      `json:"warmup,omitempty"`
+    Seed      *uint64  `json:"seed,omitempty"`
+    Algos     []string `json:"algos,omitempty"`
+    Threads   int      `json:"threads,omitempty"`
+    Assert    bool     `json:"assert_sorted,omitempty"`
+    Baseline  *string  `json:"baseline,omitempty"`
+    Plugins   []string `json:"plugins,omitempty"`
+    TimeoutMs int      `json:"timeout_ms,omitempty"`
+    // Distribution tunables
+    PartialPct   int     `json:"partial_shuffle_pct,omitempty"`
+    DupValues    int     `json:"dup_values,omitempty"`
+    ZipfS        float64 `json:"zipf_s,omitempty"`
+    RunsAlpha    float64 `json:"runs_alpha,omitempty"`
+    StaggerBlock int     `json:"stagger_block,omitempty"`
 }
 
 type errorResp struct {
@@ -124,19 +131,23 @@ func metaHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func listAlgos(typ string, plugins []string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	args := []string{"--type", typ, "--list"}
-	for _, p := range plugins {
-		if p != "" {
-			args = append(args, "--plugin", p)
-		}
-	}
-	cmd := exec.CommandContext(ctx, sbPath(), args...)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("list algos failed: %w", err)
-	}
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    args := []string{"--type", typ, "--list"}
+    for _, p := range plugins {
+        if p != "" {
+            args = append(args, "--plugin", p)
+        }
+    }
+    path := sbPath()
+    if fi, err := os.Stat(path); err != nil || fi.IsDir() {
+        return nil, fmt.Errorf("sortbench binary not found at %q; build it or set SORTBENCH_BIN", path)
+    }
+    cmd := exec.CommandContext(ctx, path, args...)
+    out, err := cmd.Output()
+    if err != nil {
+        return nil, fmt.Errorf("list algos failed: %w", err)
+    }
 	lines := strings.Split(string(out), "\n")
 	var names []string
 	for _, l := range lines {
@@ -218,6 +229,84 @@ func withMetrics(route string, h func(http.ResponseWriter, *http.Request)) http.
         h(rec, r)
         reqTotal.WithLabelValues(route, strconv.Itoa(rec.code)).Inc()
         reqDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+    })
+}
+
+// =============== Rate Limiting ===============
+
+type bucket struct {
+    mu          sync.Mutex
+    tokens      float64
+    lastRefill  time.Time
+}
+
+var (
+    rlMu        sync.Mutex
+    rlBuckets   = make(map[string]*bucket)
+    rlCapacity  = 60.0 // default burst (requests)
+    rlRate      = 60.0 // default rate (requests per minute)
+    trustXFF    = false
+)
+
+func init() {
+    if v := os.Getenv("RATE_LIMIT_R"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 { rlRate = float64(n) }
+    }
+    if v := os.Getenv("RATE_LIMIT_B"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 { rlCapacity = float64(n) }
+    }
+    if os.Getenv("TRUST_XFF") == "1" { trustXFF = true }
+}
+
+func clientIP(r *http.Request) string {
+    if trustXFF {
+        if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+            parts := strings.Split(xff, ",")
+            return strings.TrimSpace(parts[0])
+        }
+    }
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil { return r.RemoteAddr }
+    return host
+}
+
+func getBucket(ip string) *bucket {
+    rlMu.Lock()
+    b := rlBuckets[ip]
+    if b == nil {
+        b = &bucket{tokens: rlCapacity, lastRefill: time.Now()}
+        rlBuckets[ip] = b
+    }
+    rlMu.Unlock()
+    return b
+}
+
+func allow(ip string) bool {
+    b := getBucket(ip)
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    now := time.Now()
+    // refill
+    elapsed := now.Sub(b.lastRefill).Seconds()
+    b.tokens += elapsed * (rlRate / 60.0)
+    if b.tokens > rlCapacity { b.tokens = rlCapacity }
+    b.lastRefill = now
+    if b.tokens >= 1.0 {
+        b.tokens -= 1.0
+        return true
+    }
+    return false
+}
+
+func withRateLimit(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ip := clientIP(r)
+        if !allow(ip) {
+            w.Header().Set("Retry-After", "1")
+            writeJSON(w, 429, errorResp{Error: "rate limit exceeded"})
+            return
+        }
+        next.ServeHTTP(w, r)
     })
 }
 
@@ -410,22 +499,28 @@ func validate(req *RunRequest) error {
 }
 
 func buildArgs(req *RunRequest) []string {
-	args := []string{"--N", strconv.FormatInt(req.N, 10), "--dist", req.Dist, "--type", req.Type, "--format", "json"}
-	if req.Repeats > 0 {
-		args = append(args, "--repeat", strconv.Itoa(req.Repeats))
-	}
-	if req.Warmup > 0 {
-		args = append(args, "--warmup", strconv.Itoa(req.Warmup))
-	}
-	if req.Seed != nil {
-		args = append(args, "--seed", strconv.FormatUint(*req.Seed, 10))
-	}
-	if len(req.Algos) > 0 {
-		args = append(args, "--algo", strings.Join(req.Algos, ","))
-	}
-	if req.Threads > 0 {
-		args = append(args, "--threads", strconv.Itoa(req.Threads))
-	}
+    args := []string{"--N", strconv.FormatInt(req.N, 10), "--dist", req.Dist, "--type", req.Type, "--format", "json"}
+    if req.Repeats > 0 {
+        args = append(args, "--repeat", strconv.Itoa(req.Repeats))
+    }
+    if req.Warmup > 0 {
+        args = append(args, "--warmup", strconv.Itoa(req.Warmup))
+    }
+    if req.Seed != nil {
+        args = append(args, "--seed", strconv.FormatUint(*req.Seed, 10))
+    }
+    // Dist tunables (always safe to pass)
+    if req.PartialPct > 0 { args = append(args, "--partial-pct", strconv.Itoa(req.PartialPct)) }
+    if req.DupValues > 0 { args = append(args, "--dups-k", strconv.Itoa(req.DupValues)) }
+    if req.ZipfS > 0 { args = append(args, "--zipf-s", strconv.FormatFloat(req.ZipfS, 'f', -1, 64)) }
+    if req.RunsAlpha > 0 { args = append(args, "--runs-alpha", strconv.FormatFloat(req.RunsAlpha, 'f', -1, 64)) }
+    if req.StaggerBlock > 0 { args = append(args, "--stagger-block", strconv.Itoa(req.StaggerBlock)) }
+    if len(req.Algos) > 0 {
+        args = append(args, "--algo", strings.Join(req.Algos, ","))
+    }
+    if req.Threads > 0 {
+        args = append(args, "--threads", strconv.Itoa(req.Threads))
+    }
 	if req.Assert {
 		args = append(args, "--assert-sorted")
 	}
@@ -501,8 +596,8 @@ func main() {
     mux.Handle("/healthz", withMetrics("healthz", healthHandler))
     mux.Handle("/readyz", withMetrics("readyz", readyHandler))
     mux.Handle("/meta", withMetrics("meta", metaHandler))
-    mux.Handle("/run", withMetrics("run", runHandler))
-    mux.Handle("/jobs", withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
+    mux.Handle("/run", withRateLimit(withMetrics("run", runHandler)))
+    mux.Handle("/jobs", withRateLimit(withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
         if r.Method == http.MethodPost {
             // enforce max jobs cap
             if maxJobs > 0 {
@@ -515,8 +610,8 @@ func main() {
             return
         }
         w.WriteHeader(405)
-    }))
-    mux.Handle("/jobs/", withMetrics("jobs_item", func(w http.ResponseWriter, r *http.Request) {
+    })))
+    mux.Handle("/jobs/", withRateLimit(withMetrics("jobs_item", func(w http.ResponseWriter, r *http.Request) {
         if strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
             cancelJobHandler(w, r)
             return
@@ -526,7 +621,7 @@ func main() {
             return
         }
         w.WriteHeader(405)
-    }))
+    })))
     // Optional env config caps
     if v := os.Getenv("MAX_N"); v != "" {
         if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 { maxN = n }

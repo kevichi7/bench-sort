@@ -14,7 +14,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential g++ make libtbb-dev golang
+          sudo apt-get install -y build-essential g++ make libtbb-dev golang curl jq
       - name: Build core and CLI
         run: make
       - name: Run core tests
@@ -32,3 +32,30 @@ jobs:
           CGO_ENABLED: 1
         run: |
           SORTBENCH_CGO=1 go build .
+      - name: Integration test (shell-out API)
+        env:
+          PORT: 8099
+          SORTBENCH_BIN: ./sortbench
+        run: |
+          cd api/go
+          go build -o ../../sortbench-api .
+          cd ../..
+          ./sortbench-api & echo $! > api.pid
+          sleep 1
+          # readiness
+          curl -fsS http://localhost:${PORT}/readyz
+          # meta
+          curl -fsS http://localhost:${PORT}/meta | jq -e '.dists | index("runs_ht")'
+          # run small
+          curl -fsS -X POST http://localhost:${PORT}/run -H 'Content-Type: application/json' \
+            -d '{"N":256,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"],"assert_sorted":true}' | jq -e '.rows | length >= 1'
+          # jobs submit + poll
+          JOB_ID=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' \
+            -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
+          echo "job=$JOB_ID"
+          for i in $(seq 1 40); do
+            S=$(curl -fsS http://localhost:${PORT}/jobs/${JOB_ID} | jq -r '.status')
+            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "$S"; break; fi
+            sleep 0.1
+          done
+          kill $(cat api.pid)
