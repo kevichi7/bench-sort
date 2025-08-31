@@ -1,5 +1,0 @@
-./cgo_bridge_stub.go
-./main.go
-./jobs_test.go
-./limits_test.go
-./main_test.go

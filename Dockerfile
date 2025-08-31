@@ -7,11 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 RUN make && make test
-WORKDIR /app
-RUN make core-cgo
 WORKDIR /app/api/go
 ENV CGO_ENABLED=1
-RUN SORTBENCH_CGO=1 go build -tags sortbench_cgo -o /out/sortbench-api .
+RUN SORTBENCH_CGO=1 go build -o /out/sortbench-api .
 
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \

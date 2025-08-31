@@ -28,6 +28,7 @@ Thumbs.db
 /custom_algo_shim.o
 /sortbench-api
 api.pid
+api/go/.gocache/
 
 # Plugins
 /plugins/*.o

@@ -66,8 +66,8 @@ src/sortbench_capi.cgo.o: src/sortbench_capi.cpp
 api-go:
 	cd api/go && go mod tidy && go build .
 
-api-go-cgo: core-cgo
-	cd api/go && SORTBENCH_CGO=1 go mod tidy && go build -tags sortbench_cgo .
+api-go-cgo:
+	cd api/go && SORTBENCH_CGO=1 go mod tidy && go build .
 
 PLUGIN_DIR := plugins
 PLUGIN_EXAMPLE := $(PLUGIN_DIR)/example_plugin.so
