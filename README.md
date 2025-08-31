@@ -244,7 +244,7 @@ int main() {
 
 Two execution modes:
 - Shell‑out (default): API spawns `./sortbench --format json ...` per request.
-- cgo (set `SORTBENCH_CGO=1`): API calls the C++ core in‑process via a small C layer.
+- cgo (set `SORTBENCH_CGO=1` and build with `-tags sortbench_cgo`): API calls the C++ core in‑process via a small C layer.
 
 Endpoints:
 - `GET /healthz` — liveness.
