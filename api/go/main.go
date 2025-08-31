@@ -510,6 +510,14 @@ func dbGetJob(ctx context.Context, id string) (*dbJob, error) {
     return &j, nil
 }
 
+// Lightweight status-only lookup used to avoid transient driver/scan issues
+// and to provide fast polling in CI without touching large JSONB fields.
+func dbGetJobStatus(ctx context.Context, id string) (string, error) {
+    var s string
+    err := db.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id=$1`, id).Scan(&s)
+    return s, err
+}
+
 func dbQueueDepth(ctx context.Context) int {
     var n int
     _ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status='pending'`).Scan(&n)
@@ -637,6 +645,12 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     if useDB {
+        // Prefer a lightweight status read to avoid any scan issues on JSONB
+        if s, err := dbGetJobStatus(r.Context(), id); err == nil && s != "" {
+            slog.Debug("db_job_status", "job_id", id, "status", s)
+            writeJSON(w, 200, map[string]any{ "id": id, "status": s })
+            return
+        }
         if j, err := dbGetJob(r.Context(), id); err == nil {
             slog.Debug("db_job_get", "job_id", id, "status", j.Status)
             writeJSON(w, 200, map[string]any{
@@ -654,7 +668,7 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
             // Be tolerant during immediate post-submit polls: if the row is not
             // yet visible for any reason, return a non-error pending status so
             // callers using retry loops don't fail on a transient 404.
-            slog.Debug("db_job_get_pending", "job_id", id)
+            slog.Debug("db_job_get_pending", "job_id", id, "error", err)
             writeJSON(w, 200, map[string]any{
                 "id": id,
                 "status": "pending",
