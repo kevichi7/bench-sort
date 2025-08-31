@@ -428,9 +428,16 @@ func initDB(ctx context.Context) error {
     if v := os.Getenv("DB_MAX_CONNS"); v != "" {
         if n, e := strconv.Atoi(v); e == nil && n > 0 { db.SetMaxOpenConns(n); db.SetMaxIdleConns(n) }
     }
-    ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-    defer cancel()
-    if err := db.PingContext(ctx2); err != nil { return err }
+    // Robust ping with small retries to tolerate container start latency
+    deadline := time.Now().Add(15 * time.Second)
+    for {
+        ctx2, cancel := context.WithTimeout(ctx, 2*time.Second)
+        err := db.PingContext(ctx2)
+        cancel()
+        if err == nil { break }
+        if time.Now().After(deadline) { return err }
+        time.Sleep(300 * time.Millisecond)
+    }
     if err := runMigrations(ctx); err != nil { return err }
     useDB = true
     return nil
@@ -497,6 +504,7 @@ func workerLoop(ctx context.Context) {
         if err != nil { _ = tx.Rollback(); time.Sleep(100*time.Millisecond); continue }
         if _, err := tx.ExecContext(ctx, `UPDATE jobs SET status='running', started_at=now() WHERE id=$1`, id); err != nil { _ = tx.Rollback(); continue }
         if err := tx.Commit(); err != nil { continue }
+        slog.Info("db_worker_claim", "job_id", id)
 
         var rr RunRequest
         _ = json.Unmarshal(reqBody, &rr)
@@ -517,6 +525,7 @@ func workerLoop(ctx context.Context) {
         }
         _, _ = db.ExecContext(ctx, `UPDATE jobs SET status='done', result_json=$2, finished_at=now(), duration_ms=$3 WHERE id=$1`, id, out, dur)
         jobsCompleted.WithLabelValues("done").Inc()
+        slog.Info("db_worker_done", "job_id", id, "duration_ms", dur)
     }
 }
 
@@ -926,7 +935,8 @@ func main() {
         slog.Error("db_init_failed", "error", err.Error())
     } else if useDB {
         wctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
-        for i := 0; i < workerCount; i++ { go workerLoop(wctx) }
+        for i := 0; i < workerCount; i++ { go func(idx int){ slog.Info("db_worker_start", "worker", idx+1); workerLoop(wctx) }(i) }
+        slog.Info("db_workers_started", "count", workerCount)
     }
 
     addr := ":8080"
