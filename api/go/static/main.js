@@ -78,27 +78,10 @@ async function init(){
   }catch(e){ qs('limits').textContent = `Failed to load limits: ${e.message}` }
 
   // Meta for selects (+ attempt to include default plugins if available)
-  const defaultPlugins = (window.SORTBENCH_CGO === '1') ? [] : ['plugins/quicksort_dp.so'];
+  // Load /meta without implicit plugins for maximum compatibility
   let meta;
-  try {
-    let metaURL = '/meta';
-    if (defaultPlugins.length) {
-      const qp = defaultPlugins.map(p => 'plugin=' + encodeURIComponent(p)).join('&');
-      metaURL = `/meta?${qp}`;
-    }
-    meta = await api(metaURL);
-    // Prefill plugin inputs so runs include the plugin by default
-    const joined = defaultPlugins.join(',');
-    const ip = qs('inpPlugins'); if (ip) ip.value = joined;
-    const jp = qs('jobPlugins'); if (jp) jp.value = joined;
-  } catch (_) {
-    try { meta = await api('/meta'); }
-    catch(e){
-      // Surface the error and abort init gracefully
-      qs('runOut').textContent = `Failed to load /meta: ${e.message}`;
-      return;
-    }
-  }
+  try { meta = await api('/meta'); }
+  catch(e){ qs('runOut').textContent = `Failed to load /meta: ${e.message}`; return; }
   for(const t of meta.types){ const o=document.createElement('option'); o.value=o.textContent=t; qs('selType').append(o); qs('jobType').append(o.cloneNode(true)); }
   for(const d of meta.dists){ const o=document.createElement('option'); o.value=o.textContent=d; qs('selDist').append(o); qs('jobDist').append(o.cloneNode(true)); }
   qs('selType').value = 'i32'; qs('jobType').value='i32'; qs('selDist').value='runs'; qs('jobDist').value='runs';

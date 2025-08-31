@@ -16,3 +16,5 @@ func runCGO(req RunRequest) ([]byte, error) {
     return nil, errors.New("cgo core not enabled; build with -tags sortbench_cgo")
 }
 
+// Indicates whether CGO core is available in this binary
+func cgoAvailable() bool { return false }

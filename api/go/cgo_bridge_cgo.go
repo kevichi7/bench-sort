@@ -17,6 +17,9 @@ import (
 	"unsafe"
 )
 
+// Indicates whether CGO core is available in this binary
+func cgoAvailable() bool { return true }
+
 func elemTypeCode(t string) (int, error) {
 	switch t {
 	case "i32":

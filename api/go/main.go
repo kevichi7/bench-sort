@@ -15,6 +15,7 @@ import (
     "os"
     "os/exec"
     "os/signal"
+    "path/filepath"
     "strconv"
     "strings"
     "sync"
@@ -93,26 +94,41 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func sbPath() string {
-	if p := os.Getenv("SORTBENCH_BIN"); p != "" {
-		return p
-	}
-	// Try PATH first
-	if p, err := exec.LookPath("sortbench"); err == nil {
-		return p
-	}
-	// Try common relative locations based on likely working directories
-	candidates := []string{
-		"./sortbench",
-		"../sortbench",
-		"../../sortbench",
-		"../../../sortbench",
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && fi.Mode().IsRegular() {
-			return c
-		}
-	}
-	return defaultSortbench
+    if p := os.Getenv("SORTBENCH_BIN"); p != "" {
+        return p
+    }
+    // PATH
+    if p, err := exec.LookPath("sortbench"); err == nil {
+        return p
+    }
+    // Relative to CWD
+    candidates := []string{
+        "./sortbench",
+        "../sortbench",
+        "../../sortbench",
+        "../../../sortbench",
+    }
+    // Relative to executable directory (robust when launched from anywhere)
+    if ex, err := os.Executable(); err == nil {
+        base := filepath.Dir(ex)
+        exCands := []string{
+            filepath.Join(base, "sortbench"),
+            filepath.Join(base, "..", "sortbench"),
+            filepath.Join(base, "..", "..", "sortbench"),
+            filepath.Join(base, "..", "..", "..", "sortbench"),
+        }
+        candidates = append(candidates, exCands...)
+    }
+    // Deduplicate and return first existing regular file
+    seen := map[string]struct{}{}
+    for _, c := range candidates {
+        if _, ok := seen[c]; ok { continue }
+        seen[c] = struct{}{}
+        if fi, err := os.Stat(c); err == nil && fi.Mode().IsRegular() {
+            return c
+        }
+    }
+    return defaultSortbench
 }
 
 func types() []string { return []string{"i32", "u32", "i64", "u64", "f32", "f64", "str"} }
@@ -123,7 +139,7 @@ func dists() []string {
 func metaHandler(w http.ResponseWriter, r *http.Request) {
     // Optional plugin=path query can be repeated
     plugins := r.URL.Query()["plugin"]
-    if os.Getenv("SORTBENCH_CGO") == "1" {
+    if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() {
         // Filter to existing files in CGO mode
         filtered := make([]string, 0, len(plugins))
         for _, p := range plugins {
@@ -134,22 +150,28 @@ func metaHandler(w http.ResponseWriter, r *http.Request) {
         }
         plugins = filtered
     }
-	algos := make(map[string][]string)
-	for _, t := range types() {
-		var names []string
-		var err error
-		if os.Getenv("SORTBENCH_CGO") == "1" {
-			names, err = listAlgosCGO(t, plugins)
-		} else {
-			names, err = listAlgos(t, plugins)
-		}
-		if err != nil {
-			writeJSON(w, 500, errorResp{Error: err.Error()})
-			return
-		}
-		algos[t] = names
-	}
-	writeJSON(w, 200, MetaResponse{Types: types(), Dists: dists(), Algos: algos})
+    algos := make(map[string][]string)
+    // Be resilient: if listing fails for a type, log and continue with empty list
+    for _, t := range types() {
+        var names []string
+        var err error
+        if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() {
+            names, err = listAlgosCGO(t, plugins)
+            if err != nil {
+                // Fallback to shell-out listing if CGO core isn't actually enabled
+                slog.Warn("meta_list_algos_failed", "type", t, "error", err.Error(), "fallback", "shell")
+                names, err = listAlgos(t, plugins)
+            }
+        } else {
+            names, err = listAlgos(t, plugins)
+        }
+        if err != nil {
+            slog.Warn("meta_list_algos_failed_final", "type", t, "error", err.Error())
+            names = []string{}
+        }
+        algos[t] = names
+    }
+    writeJSON(w, 200, MetaResponse{Types: types(), Dists: dists(), Algos: algos})
 }
 
 // Limits/introspection
@@ -169,7 +191,7 @@ type LimitsResponse struct {
 
 func limitsHandler(w http.ResponseWriter, r *http.Request) {
     mode := "shell"
-    if os.Getenv("SORTBENCH_CGO") == "1" { mode = "cgo" }
+    if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() { mode = "cgo" }
     writeJSON(w, 200, LimitsResponse{
         MaxN: maxN,
         MaxRepeats: maxRepeats,
@@ -234,7 +256,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), tout)
 	defer cancel()
-    if os.Getenv("SORTBENCH_CGO") == "1" {
+    if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() {
         // In CGO mode, drop any plugin paths that do not exist to avoid
         // dlopen of invalid paths inside the C++ core.
         if len(req.Plugins) > 0 {
@@ -501,7 +523,7 @@ func dbEnqueue(ctx context.Context, req RunRequest) (string, error) {
 
 func nilIfEmpty(p *string) any { if p==nil || *p=="" { return nil }; return *p }
 func pqStringArray(v []string) any { if len(v)==0 { return nil }; return "{"+strings.Join(v,",")+"}" }
-func modeString() string { if os.Getenv("SORTBENCH_CGO") == "1" { return "cgo" }; return "shell" }
+func modeString() string { if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() { return "cgo" }; return "shell" }
 
 func dbGetJob(ctx context.Context, id string) (*dbJob, error) {
     row := db.QueryRowContext(ctx, `SELECT id,status,request_json,result_json,error,created_at,started_at,finished_at,duration_ms FROM jobs WHERE id=$1`, id)
@@ -603,7 +625,7 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
         jobsRunningGauge.Inc()
         var out []byte
         var err error
-		if os.Getenv("SORTBENCH_CGO") == "1" {
+		if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() {
 			out, err = runCGO(req)
 		} else {
 			args := buildArgs(&req)
@@ -812,10 +834,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 // readyz: ensure discovery and tiny smoke run succeed
 func readyHandler(w http.ResponseWriter, r *http.Request) {
     // quick algo discovery for i32
-    if os.Getenv("SORTBENCH_CGO") == "1" {
+    if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() {
         if _, err := listAlgosCGO("i32", nil); err != nil {
-            writeJSON(w, 500, errorResp{Error: "algo discovery failed: " + err.Error()})
-            return
+            // Fallback to shell-out discovery when CGO core isn't present
+            if _, err2 := listAlgos("i32", nil); err2 != nil {
+                writeJSON(w, 500, errorResp{Error: "algo discovery failed: " + err.Error()})
+                return
+            }
         }
     } else {
         if _, err := listAlgos("i32", nil); err != nil {
@@ -889,9 +914,7 @@ func requireAPIKey(next http.Handler) http.Handler {
 
 // Execute a run and return JSON bytes
 func execRun(ctx context.Context, req RunRequest) ([]byte, error) {
-    if os.Getenv("SORTBENCH_CGO") == "1" {
-        return runCGO(req)
-    }
+    if os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable() { return runCGO(req) }
     args := buildArgs(&req)
     cmd := exec.CommandContext(ctx, sbPath(), args...)
     out, err := cmd.Output()
@@ -984,7 +1007,16 @@ func main() {
     if v := os.Getenv("PORT"); v != "" {
         addr = ":" + v
     }
-    log.Printf("sortbench API listening on %s (bin=%s)", addr, sbPath())
+    // Log resolved sortbench binary path and whether it exists (shell mode)
+    sb := sbPath()
+    if !(os.Getenv("SORTBENCH_CGO") == "1" && cgoAvailable()) {
+        if fi, err := os.Stat(sb); err != nil || fi.IsDir() {
+            slog.Warn("sortbench_bin_missing", "path", sb)
+        } else {
+            slog.Info("sortbench_bin_found", "path", sb)
+        }
+    }
+    log.Printf("sortbench API listening on %s (bin=%s)", addr, sb)
     srv := &http.Server{
         Addr:              addr,
         Handler:           mux,
