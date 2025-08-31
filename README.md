@@ -6,6 +6,34 @@ sortbench is a high‑performance sorting benchmark with:
 - An optional Go HTTP API (shell‑out or cgo) exposing sync and async benchmarking endpoints.
 It reports per‑run stats (median/mean/min/max/stddev), can render plots via gnuplot, and supports runtime‑loadable plugins (multi‑type ABI). A compact Go HTTP API wraps the core to provide sync runs, async jobs, a small web UI, and metrics.
 
+## 90‑Second Path
+
+1) Install deps (Ubuntu):
+```
+sudo apt-get update && sudo apt-get install -y build-essential g++ make libtbb-dev curl jq
+```
+
+2) Build the CLI and run a quick check:
+```
+make
+./sortbench --N 1e6 --format table --verify
+```
+
+3) Start the HTTP API (serves the web UI at http://localhost:8080/):
+```
+make api-go
+PORT=8080 api/go/sortbench-api
+```
+
+4) One cURL demo (/run):
+```
+curl -s -X POST http://localhost:8080/run \
+  -H 'Content-Type: application/json' \
+  -d '{"N":100000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"],"assert_sorted":true}' | jq
+```
+
+Read more: [Build](#build) · [Go HTTP API](#go-http-api) · [Web UI](#web-ui-apigostatic) · [Cross‑language plugins](#crosslanguage-plugins-c-abi) · [CI/DB](#ci) · [Full flags](#full-flag-reference)
+
 ## Features
 
 - Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, `timsort`, quicksort hybrid, quicksort 3-way, radix (for integral types), optional PDQSort, and user plugins. Additional educational/experimental algorithms are available: insertion sort, selection sort, bubble sort, comb sort, shell sort.
