@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BenchSort</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>BenchSort</h1>
+    <div class="keys">
+      <label>API Key <input id="apiKey" placeholder="X-API-Key" /></label>
+      <button id="saveKey">Save</button>
+      <span id="mode"></span>
+    </div>
+  </header>
+  <main>
+    <section class="card" id="run-section">
+      <h2>Run (Sync)</h2>
+      <div class="grid">
+        <label>N <input id="inpN" type="text" value="100000" placeholder="e.g. 1e6, 10m, 250000" /></label>
+        <label>Type <select id="selType"></select></label>
+        <label>Dist <select id="selDist"></select></label>
+        <label>Repeats <input id="inpRep" type="number" value="1" /></label>
+        <label>Threads <input id="inpThreads" type="number" value="0" /></label>
+        <label><input id="chkAssert" type="checkbox" /> Assert sorted</label>
+        <label>Sequential Algos
+          <select id="selAlgosSeq" multiple size="6"></select>
+        </label>
+        <label>Parallel Algos
+          <select id="selAlgosPar" multiple size="6"></select>
+        </label>
+      </div>
+      <details>
+        <summary>Advanced</summary>
+        <div class="grid">
+          <label>Warmup <input id="inpWarmup" type="number" min="0" value="0" /></label>
+          <label>Seed <input id="inpSeed" type="text" placeholder="e.g. 42" /></label>
+          <label>Timeout (ms) <input id="inpTimeout" type="number" min="0" placeholder="auto" /></label>
+          <label>Plugins (.so paths, comma-separated)
+            <input id="inpPlugins" type="text" placeholder="/path/a.so,/path/b.so" />
+          </label>
+          <label>Partial Shuffle % <input id="inpPartialPct" type="number" min="0" max="100" /></label>
+          <label>Dup Values <input id="inpDupValues" type="number" min="0" /></label>
+          <label>Zipf s <input id="inpZipfS" type="number" step="0.01" /></label>
+          <label>Runs alpha <input id="inpRunsAlpha" type="number" step="0.01" /></label>
+          <label>Stagger block <input id="inpStaggerBlock" type="number" min="0" /></label>
+        </div>
+      </details>
+      <div class="actions">
+        <button id="btnRun">Run</button>
+        <button type="button" id="btnClearRun" class="btn-secondary">Clear</button>
+        <button type="button" id="btnPin" class="btn-secondary">Pin</button>
+        <button type="button" id="btnClearPins" class="btn-secondary">Clear Pins</button>
+        <label>Sort
+          <select id="selSortBy">
+            <option value="median_ms" selected>Median</option>
+            <option value="mean_ms">Mean</option>
+            <option value="min_ms">Min</option>
+            <option value="max_ms">Max</option>
+            <option value="stddev_ms">Stddev</option>
+            <option value="algo">Name</option>
+          </select>
+          <select id="selSortDir">
+            <option value="asc" selected>Asc</option>
+            <option value="desc">Desc</option>
+          </select>
+        </label>
+        <label><input id="chkLogScale" type="checkbox" /> Log scale</label>
+        <label>Baseline
+          <select id="selBaseline"><option value="">None</option></select>
+        </label>
+        <button id="btnExportCSV" class="btn-secondary">Export CSV</button>
+        <button id="btnSavePNG" class="btn-secondary">Save PNG</button>
+      </div>
+      <div id="pinsLegend" class="muted"></div>
+      <div class="viz">
+        <div>
+          <h3>Results</h3>
+          <table id="runTable" class="table"><thead></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <h3>Median (ms)</h3>
+          <canvas id="runChart" height="280"></canvas>
+        </div>
+      </div>
+      <details>
+        <summary>Raw JSON</summary>
+        <pre id="runOut" class="code"></pre>
+      </details>
+    </section>
+    <section class="card" id="jobs-section">
+      <h2>Jobs (Async)</h2>
+      <div class="grid">
+        <label>N <input id="jobN" type="text" value="500000" placeholder="e.g. 1e6, 10m, 250000" /></label>
+        <label>Type <select id="jobType"></select></label>
+        <label>Dist <select id="jobDist"></select></label>
+        <label>Repeats <input id="jobRep" type="number" value="1" /></label>
+        <label class="col-span-2">Threads <input id="jobThreads" type="number" value="0" /></label>
+        <label>Sequential Algos
+          <select id="jobAlgosSeq" multiple size="6"></select>
+        </label>
+        <label>Parallel Algos
+          <select id="jobAlgosPar" multiple size="6"></select>
+        </label>
+      </div>
+      <details>
+        <summary>Advanced</summary>
+        <div class="grid">
+          <label>Warmup <input id="jobWarmup" type="number" min="0" value="0" /></label>
+          <label>Seed <input id="jobSeed" type="text" placeholder="e.g. 42" /></label>
+          <label>Timeout (ms) <input id="jobTimeout" type="number" min="0" placeholder="auto" /></label>
+          <label>Plugins (.so paths, comma-separated)
+            <input id="jobPlugins" type="text" placeholder="/path/a.so,/path/b.so" />
+          </label>
+          <label>Partial Shuffle % <input id="jobPartialPct" type="number" min="0" max="100" /></label>
+          <label>Dup Values <input id="jobDupValues" type="number" min="0" /></label>
+          <label>Zipf s <input id="jobZipfS" type="number" step="0.01" /></label>
+          <label>Runs alpha <input id="jobRunsAlpha" type="number" step="0.01" /></label>
+          <label>Stagger block <input id="jobStaggerBlock" type="number" min="0" /></label>
+        </div>
+      </details>
+      <div class="actions">
+        <button id="btnSubmit">Submit Job</button>
+        <button id="btnCancel" class="btn-secondary">Cancel</button>
+        <button id="btnPoll" class="btn-secondary">Poll</button>
+        <button type="button" id="btnClearJob" class="btn-secondary">Clear</button>
+      </div>
+      <div id="jobStatus" class="muted"></div>
+      <details>
+        <summary>Job JSON</summary>
+        <pre id="jobOut" class="code"></pre>
+      </details>
+    </section>
+    <section class="card" id="limits-section">
+      <h2>Limits</h2>
+      <table id="limitsTable" class="table"><tbody></tbody></table>
+      <details>
+        <summary>Raw JSON</summary>
+        <pre id="limits" class="code"></pre>
+      </details>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/main.js"></script>
+</body>
+</html>

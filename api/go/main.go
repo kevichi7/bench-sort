@@ -3,10 +3,11 @@ package main
 import (
     "context"
     "database/sql"
-    _ "embed"
+    "embed"
     "encoding/json"
     "errors"
     "fmt"
+    "io/fs"
     "log/slog"
     "log"
     "net"
@@ -36,6 +37,9 @@ var (
     defaultTimeout   = 2 * time.Minute
     workerCount      = 4
 )
+
+//go:embed static
+var uiFS embed.FS
 
 // Prometheus metrics
 var (
@@ -852,6 +856,10 @@ func main() {
     logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
     slog.SetDefault(logger)
     mux := http.NewServeMux()
+    // Static UI (served from api/go/static)
+    if sub, err := fs.Sub(uiFS, "static"); err == nil {
+        mux.Handle("/", http.FileServer(http.FS(sub)))
+    }
     mux.Handle("/metrics", promhttp.Handler())
     mux.Handle("/healthz", withMetrics("healthz", healthHandler))
     mux.Handle("/readyz", withMetrics("readyz", readyHandler))

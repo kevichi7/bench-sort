@@ -56,6 +56,7 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
           WORKERS: 2
         run: |
+          set -euo pipefail
           cd api/go
           go build -o ../../sortbench-api .
           cd ../..
@@ -68,10 +69,12 @@ jobs:
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
           [ -n "$JOB_ID" ]
           for i in $(seq 1 60); do
-            S=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID} | jq -r '.status')
-            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "$S"; break; fi
+            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID})
+            S=$(printf '%s' "$RESP" | jq -r '.status')
+            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "status=$S"; break; fi
             sleep 0.2
           done
+          test "$S" = "done" -o "$S" = "failed" -o "$S" = "canceled"
           # cancel a second job quickly
           JOB2=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' -H 'X-API-Key: testkey' \
             -d '{"N":80000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
@@ -83,6 +86,7 @@ jobs:
           SORTBENCH_BIN: ./sortbench
           BENCHSORT_API_KEYS: testkey
         run: |
+          set -euo pipefail
           cd api/go
           go build -o ../../sortbench-api .
           cd ../..
@@ -100,8 +104,10 @@ jobs:
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
           echo "job=$JOB_ID"
           for i in $(seq 1 40); do
-            S=$(curl -fsS http://localhost:${PORT}/jobs/${JOB_ID} | jq -r '.status')
-            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "$S"; break; fi
+            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID})
+            S=$(printf '%s' "$RESP" | jq -r '.status')
+            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "status=$S"; break; fi
             sleep 0.1
           done
+          test "$S" = "done" -o "$S" = "failed" -o "$S" = "canceled"
           kill $(cat api.pid)

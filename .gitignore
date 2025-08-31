@@ -26,6 +26,8 @@ Thumbs.db
 /sortbench
 /sortbench.o
 /custom_algo_shim.o
+/sortbench-api
+api.pid
 
 # Plugins
 /plugins/*.o

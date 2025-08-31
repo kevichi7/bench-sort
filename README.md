@@ -8,7 +8,7 @@ It reports per‑run stats (median/mean/min/max/stddev), can render plots via gn
 
 ## Features
 
-- Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, `timsort`, quicksort hybrid, radix (for integral types), optional PDQSort, and user plugins.
+- Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, `timsort`, quicksort hybrid, quicksort 3-way, radix (for integral types), optional PDQSort, and user plugins. Additional educational/experimental algorithms are available: insertion sort, selection sort, bubble sort, comb sort, shell sort.
 - Distributions: `random`, `partial`, `dups`, `reverse`, plus `sorted`, `saw`, `runs`, `gauss`, `exp`, `zipf`, `organpipe`, `staggered`, `runs_ht`.
 - Element types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `str`.
 - Repeats, warmup, verification, CSV/table/JSON/JSONL output, per‑run stats.
@@ -177,6 +177,16 @@ Load one or more plugins:
 --plugin path/to/lib1.so --plugin lib2.so
 ```
 
+Dual-Pivot QuickSort plugin is included under `plugins/quicksort_dp.so`.
+
+```
+# List including the plugin
+./sortbench --plugin plugins/quicksort_dp.so --list | grep dualpivot
+
+# Run with the plugin
+./sortbench --plugin plugins/quicksort_dp.so --algo std_sort,dualpivot_quicksort --N 2e5 --dist runs --repeat 3 --warmup 1 --format table
+```
+
 Build a plugin source with the recorded build flags:
 
 ```
@@ -260,6 +270,8 @@ curl -X POST http://localhost:8080/jobs \
   -d '{"N":1000000,"dist":"runs","type":"i32","repeats":3,"algos":["std_sort","timsort"]}'
 curl http://localhost:8080/jobs/<job_id> | jq
 ```
+
+Frontend auto-detects `plugins/minmax_qs.so` and includes it in `/meta` and run requests if present. You can override or add more via the “Plugins” fields.
 
 ### Metrics
 

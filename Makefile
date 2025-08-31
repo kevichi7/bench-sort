@@ -51,15 +51,19 @@ api-go-cgo:
 PLUGIN_DIR := plugins
 PLUGIN_EXAMPLE := $(PLUGIN_DIR)/example_plugin.so
 PLUGIN_CUSTOM := $(PLUGIN_DIR)/custom_cpp25.so
+PLUGIN_DP := $(PLUGIN_DIR)/quicksort_dp.so
 
 .PHONY: plugins example-plugin custom-plugin
-plugins: $(PLUGIN_EXAMPLE) $(PLUGIN_CUSTOM)
+plugins: $(PLUGIN_EXAMPLE) $(PLUGIN_CUSTOM) $(PLUGIN_DP)
 
 $(PLUGIN_DIR)/example_plugin.so: $(PLUGIN_DIR)/example_plugin.cpp sortbench_plugin.h
 	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $(PLUGIN_DIR)/example_plugin.cpp $(LDFLAGS)
 
 $(PLUGIN_DIR)/custom_cpp25.so: $(PLUGIN_DIR)/custom_cpp25.cpp sortbench_plugin.h ../CppTest25orig5.cpp ../BenchStats.h ../radix11_omp.hpp
 	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $(PLUGIN_DIR)/custom_cpp25.cpp $(LDFLAGS)
+
+$(PLUGIN_DP): $(PLUGIN_DIR)/quicksort_dp.cpp sortbench_plugin.h
+	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $(PLUGIN_DIR)/quicksort_dp.cpp $(LDFLAGS)
 
 clean:
 	rm -f $(OBJ) $(TARGET) $(CORE_OBJ) $(CORE_LIB)

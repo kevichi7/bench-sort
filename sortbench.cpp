@@ -848,6 +848,75 @@ template <class T> inline void heap_sort(std::vector<T> &v) {
   std::sort_heap(v.begin(), v.end());
 }
 
+// Classic insertion sort (exposed as a full algo)
+template <class T> inline void insertion_sort_full(std::vector<T> &v) {
+  insertion_sort(v.begin(), v.end());
+}
+
+// Selection sort (O(n^2))
+template <class T> inline void selection_sort(std::vector<T> &v) {
+  const std::size_t n = v.size();
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    std::size_t min_i = i;
+    for (std::size_t j = i + 1; j < n; ++j) if (v[j] < v[min_i]) min_i = j;
+    if (min_i != i) std::swap(v[i], v[min_i]);
+  }
+}
+
+// Bubble sort (with early-exit)
+template <class T> inline void bubble_sort(std::vector<T> &v) {
+  const std::size_t n = v.size();
+  if (n < 2) return;
+  bool swapped = true;
+  for (std::size_t pass = 0; pass < n - 1 && swapped; ++pass) {
+    swapped = false;
+    for (std::size_t i = 0; i + 1 < n - pass; ++i) {
+      if (v[i + 1] < v[i]) { std::swap(v[i], v[i + 1]); swapped = true; }
+    }
+  }
+}
+
+// Comb sort (gap shrink variant of bubble sort)
+template <class T> inline void comb_sort(std::vector<T> &v) {
+  const std::size_t n = v.size();
+  if (n < 2) return;
+  double gap = (double)n;
+  const double shrink = 1.3;
+  bool swapped = true;
+  while (gap > 1.0 || swapped) {
+    gap = std::floor(gap / shrink);
+    if (gap < 1.0) gap = 1.0;
+    std::size_t igap = static_cast<std::size_t>(gap);
+    swapped = false;
+    for (std::size_t i = 0; i + igap < n; ++i) {
+      std::size_t j = i + igap;
+      if (v[j] < v[i]) { std::swap(v[i], v[j]); swapped = true; }
+    }
+  }
+}
+
+// Shell sort (Ciura gap sequence extended)
+template <class T> inline void shell_sort(std::vector<T> &v) {
+  static const int ciura_base[] = {1, 4, 10, 23, 57, 132, 301, 701};
+  std::vector<int> gaps(ciura_base, ciura_base + (sizeof(ciura_base)/sizeof(int)));
+  // Extend Ciura sequence
+  while ((long long)gaps.back() * 2.25 < (long long)v.size()) {
+    gaps.push_back(int(gaps.back() * 2.25));
+  }
+  for (int gi = (int)gaps.size() - 1; gi >= 0; --gi) {
+    int gap = gaps[gi]; if (gap <= 0) continue;
+    for (std::size_t i = gap; i < v.size(); ++i) {
+      auto tmp = v[i];
+      std::size_t j = i;
+      while (j >= (std::size_t)gap && tmp < v[j - gap]) {
+        v[j] = v[j - gap];
+        j -= gap;
+      }
+      v[j] = tmp;
+    }
+  }
+}
+
 // Iterative bottom-up merge sort with reusable buffer and std::copy
 template <class T> inline void merge_sort_opt(std::vector<T> &v) {
   const std::size_t n = v.size();
@@ -928,6 +997,34 @@ template <class Iter> inline void quicksort_hybrid_impl(Iter first, Iter last) {
 template <class T> inline void quicksort_hybrid(std::vector<T> &v) {
   if (!v.empty())
     quicksort_hybrid_impl(v.begin(), v.end());
+}
+
+// 3-way quicksort (Dijkstra) good for many equal keys
+template <class Iter> inline void quicksort_3way_impl(Iter lo, Iter hi) {
+  while (hi - lo > 64) {
+    Iter i = lo, lt = lo, gt = hi - 1;
+    auto pivot = *(lo + (hi - lo) / 2);
+    while (i <= gt) {
+      if (*i < pivot) { std::iter_swap(lt++, i++); }
+      else if (pivot < *i) { std::iter_swap(i, gt--); }
+      else { ++i; }
+    }
+    // Recurse into smaller partition first
+    auto left_size = lt - lo;
+    auto right_size = hi - (gt + 1);
+    if (left_size < right_size) {
+      if (left_size > 1) quicksort_3way_impl(lo, lt);
+      lo = gt + 1;
+    } else {
+      if (right_size > 1) quicksort_3way_impl(gt + 1, hi);
+      hi = lt;
+    }
+  }
+  insertion_sort(lo, hi);
+}
+
+template <class T> inline void quicksort_3way(std::vector<T> &v) {
+  if (!v.empty()) quicksort_3way_impl(v.begin(), v.end());
 }
 
 // Simplified TimSort: detects natural runs, extends short runs to a minrun
@@ -1125,9 +1222,15 @@ template <class T> static std::vector<AlgoT<T>> build_registry_t() {
 #endif
   regs.push_back({"heap_sort", [](auto &v) { algos::heap_sort(v); }});
   regs.push_back({"merge_sort_opt", [](auto &v) { algos::merge_sort_opt(v); }});
+  regs.push_back({"insertion_sort", [](auto &v) { algos::insertion_sort_full(v); }});
+  regs.push_back({"selection_sort", [](auto &v) { algos::selection_sort(v); }});
+  regs.push_back({"bubble_sort", [](auto &v) { algos::bubble_sort(v); }});
+  regs.push_back({"comb_sort", [](auto &v) { algos::comb_sort(v); }});
+  regs.push_back({"shell_sort", [](auto &v) { algos::shell_sort(v); }});
   regs.push_back({"timsort", [](auto &v) { algos::timsort(v); }});
   regs.push_back(
       {"quicksort_hybrid", [](auto &v) { algos::quicksort_hybrid(v); }});
+  regs.push_back({"quicksort_3way", [](auto &v) { algos::quicksort_3way(v); }});
   if constexpr (std::is_integral_v<T>) {
     regs.push_back(
         {"radix_sort_lsd", [](auto &v) { algos::radix_sort_lsd(v); }});
