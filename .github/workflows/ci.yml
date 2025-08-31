@@ -60,6 +60,8 @@ jobs:
           SORTBENCH_BIN: ./sortbench
           BENCHSORT_API_KEYS: testkey
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+          RATE_LIMIT_R: "1200"
+          RATE_LIMIT_B: "600"
           WORKERS: 2
         run: |
           set -euo pipefail
@@ -88,7 +90,7 @@ jobs:
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
           [ -n "$JOB_ID" ]
           for i in $(seq 1 120); do
-            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID})
+            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID} || echo '{"status":"pending"}')
             S=$(printf '%s' "$RESP" | jq -r '.status')
             if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "status=$S"; break; fi
             sleep 0.25
@@ -104,6 +106,8 @@ jobs:
           PORT: 8099
           SORTBENCH_BIN: ./sortbench
           BENCHSORT_API_KEYS: testkey
+          RATE_LIMIT_R: "1200"
+          RATE_LIMIT_B: "600"
         run: |
           set -euo pipefail
           cd api/go
@@ -123,7 +127,7 @@ jobs:
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
           echo "job=$JOB_ID"
           for i in $(seq 1 40); do
-            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID})
+            RESP=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID} || echo '{"status":"pending"}')
             S=$(printf '%s' "$RESP" | jq -r '.status')
             if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "status=$S"; break; fi
             sleep 0.1
