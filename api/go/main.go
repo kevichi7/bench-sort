@@ -432,14 +432,34 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 
 // GET /jobs/{id}
 func getJobHandler(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/jobs/")
-	if id == "" {
-		writeJSON(w, 400, errorResp{Error: "missing job id"})
-		return
-	}
+    id := strings.TrimPrefix(r.URL.Path, "/jobs/")
+    if id == "" {
+        writeJSON(w, 400, errorResp{Error: "missing job id"})
+        return
+    }
     if j, ok := jobs.get(id); ok {
-        j.mu.Lock(); cj := *j; j.mu.Unlock()
-        writeJSON(w, 200, cj)
+        j.mu.Lock()
+        resp := struct{
+            ID         string          `json:"id"`
+            Status     JobStatus       `json:"status"`
+            Error      string          `json:"error,omitempty"`
+            ResultJSON json.RawMessage `json:"result,omitempty"`
+            CreatedAt  time.Time       `json:"created_at"`
+            StartedAt  time.Time       `json:"started_at,omitempty"`
+            FinishedAt time.Time       `json:"finished_at,omitempty"`
+            DurationMs int64           `json:"duration_ms,omitempty"`
+        }{
+            ID: j.ID,
+            Status: j.Status,
+            Error: j.Error,
+            ResultJSON: j.ResultJSON,
+            CreatedAt: j.CreatedAt,
+            StartedAt: j.StartedAt,
+            FinishedAt: j.FinishedAt,
+            DurationMs: j.DurationMs,
+        }
+        j.mu.Unlock()
+        writeJSON(w, 200, resp)
     } else {
         writeJSON(w, 404, errorResp{Error: "not found"})
     }
