@@ -2,13 +2,15 @@ package main
 
 import (
     "context"
+    "database/sql"
+    _ "embed"
     "encoding/json"
     "errors"
     "fmt"
     "log/slog"
     "log"
-    "net/http"
     "net"
+    "net/http"
     "os"
     "os/exec"
     "os/signal"
@@ -20,6 +22,8 @@ import (
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promauto"
     "github.com/prometheus/client_golang/prometheus/promhttp"
+    _ "github.com/jackc/pgx/v5/stdlib"
+    "github.com/google/uuid"
 )
 
 // Basic config and defaults
@@ -30,6 +34,7 @@ var (
     maxThreads       = 0   // 0 = unlimited
     maxJobs          = 64  // concurrent async jobs cap
     defaultTimeout   = 2 * time.Minute
+    workerCount      = 4
 )
 
 // Prometheus metrics
@@ -41,6 +46,8 @@ var (
     jobsCompleted    = promauto.NewCounterVec(prometheus.CounterOpts{Name: "sortbench_jobs_completed_total", Help: "Total async jobs completed by result"}, []string{"result"})
     runDuration      = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "sortbench_run_duration_seconds", Help: "Duration of benchmark runs", Buckets: prometheus.DefBuckets}, []string{"mode", "dist", "type"})
     jobsDuration     = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "sortbench_job_duration_seconds", Help: "Duration of async jobs", Buckets: prometheus.DefBuckets}, []string{"result"})
+    queueDepthGauge  = promauto.NewGauge(prometheus.GaugeOpts{Name: "sortbench_queue_depth", Help: "Number of pending jobs in queue"})
+    workersBusyGauge = promauto.NewGauge(prometheus.GaugeOpts{Name: "sortbench_workers_busy", Help: "Workers currently running jobs"})
 )
 
 type MetaResponse struct {
@@ -128,6 +135,39 @@ func metaHandler(w http.ResponseWriter, r *http.Request) {
 		algos[t] = names
 	}
 	writeJSON(w, 200, MetaResponse{Types: types(), Dists: dists(), Algos: algos})
+}
+
+// Limits/introspection
+type LimitsResponse struct {
+    MaxN          int64   `json:"max_n"`
+    MaxRepeats    int     `json:"max_repeats"`
+    MaxThreads    int     `json:"max_threads"`
+    MaxJobs       int     `json:"max_jobs"`
+    Workers       int     `json:"workers"`
+    TimeoutMs     int     `json:"timeout_ms"`
+    RateRPerMin   int     `json:"rate_r_per_min"`
+    RateBurst     int     `json:"rate_burst"`
+    TrustXFF      bool    `json:"trust_xff"`
+    Mode          string  `json:"mode"` // shell|cgo
+    DBEnabled     bool    `json:"db_enabled"`
+}
+
+func limitsHandler(w http.ResponseWriter, r *http.Request) {
+    mode := "shell"
+    if os.Getenv("SORTBENCH_CGO") == "1" { mode = "cgo" }
+    writeJSON(w, 200, LimitsResponse{
+        MaxN: maxN,
+        MaxRepeats: maxRepeats,
+        MaxThreads: maxThreads,
+        MaxJobs: maxJobs,
+        Workers: workerCount,
+        TimeoutMs: int(defaultTimeout / time.Millisecond),
+        RateRPerMin: int(rlRate),
+        RateBurst: int(rlCapacity),
+        TrustXFF: trustXFF,
+        Mode: mode,
+        DBEnabled: useDB,
+    })
 }
 
 func listAlgos(typ string, plugins []string) ([]string, error) {
@@ -363,6 +403,119 @@ func (jm *JobManager) cancelAll() {
     }
 }
 
+// =============== DB-backed Jobs (Postgres) ===============
+
+var (
+    db        *sql.DB
+    useDB     bool
+    runningMu sync.Mutex
+    running   = make(map[string]context.CancelFunc) // job_id -> cancel
+)
+
+//go:embed migrations/001_init.sql
+var mig001 string
+
+func initDB(ctx context.Context) error {
+    dsn := os.Getenv("DATABASE_URL")
+    if dsn == "" { return nil }
+    var err error
+    db, err = sql.Open("pgx", dsn)
+    if err != nil { return err }
+    if v := os.Getenv("DB_MAX_CONNS"); v != "" {
+        if n, e := strconv.Atoi(v); e == nil && n > 0 { db.SetMaxOpenConns(n); db.SetMaxIdleConns(n) }
+    }
+    ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    if err := db.PingContext(ctx2); err != nil { return err }
+    if err := runMigrations(ctx); err != nil { return err }
+    useDB = true
+    return nil
+}
+
+func runMigrations(ctx context.Context) error {
+    if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY)"); err != nil { return err }
+    var exists string
+    _ = db.QueryRowContext(ctx, "SELECT version FROM schema_migrations WHERE version='001'").Scan(&exists)
+    if exists == "001" { return nil }
+    if _, err := db.ExecContext(ctx, mig001); err != nil { return err }
+    if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations(version) VALUES('001')"); err != nil { return err }
+    return nil
+}
+
+type dbJob struct{
+    ID string
+    Status string
+    Request json.RawMessage
+    Result json.RawMessage
+    Error string
+    CreatedAt time.Time
+    StartedAt sql.NullTime
+    FinishedAt sql.NullTime
+    DurationMs sql.NullInt64
+}
+
+func dbEnqueue(ctx context.Context, req RunRequest) (string, error) {
+    id := uuid.NewString()
+    body, _ := json.Marshal(req)
+    _, err := db.ExecContext(ctx, `INSERT INTO jobs(id,status,request_json,dist,elem_type,repeats,threads,baseline,algos,mode)
+        VALUES($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9)`, id, body, req.Dist, req.Type, req.Repeats, req.Threads, nilIfEmpty(req.Baseline), pqStringArray(req.Algos), modeString())
+    if err != nil { return "", err }
+    return id, nil
+}
+
+func nilIfEmpty(p *string) any { if p==nil || *p=="" { return nil }; return *p }
+func pqStringArray(v []string) any { if len(v)==0 { return nil }; return "{"+strings.Join(v,",")+"}" }
+func modeString() string { if os.Getenv("SORTBENCH_CGO") == "1" { return "cgo" }; return "shell" }
+
+func dbGetJob(ctx context.Context, id string) (*dbJob, error) {
+    row := db.QueryRowContext(ctx, `SELECT id,status,request_json,result_json,error,created_at,started_at,finished_at,duration_ms FROM jobs WHERE id=$1`, id)
+    var j dbJob
+    if err := row.Scan(&j.ID,&j.Status,&j.Request,&j.Result,&j.Error,&j.CreatedAt,&j.StartedAt,&j.FinishedAt,&j.DurationMs); err != nil { return nil, err }
+    return &j, nil
+}
+
+func dbQueueDepth(ctx context.Context) int {
+    var n int
+    _ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status='pending'`).Scan(&n)
+    return n
+}
+
+func workerLoop(ctx context.Context) {
+    for {
+        select { case <-ctx.Done(): return; default: }
+        queueDepthGauge.Set(float64(dbQueueDepth(ctx)))
+        tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+        if err != nil { time.Sleep(100*time.Millisecond); continue }
+        var id string
+        var reqBody []byte
+        err = tx.QueryRowContext(ctx, `SELECT id, request_json FROM jobs WHERE status='pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id, &reqBody)
+        if err == sql.ErrNoRows { _ = tx.Rollback(); time.Sleep(100*time.Millisecond); continue }
+        if err != nil { _ = tx.Rollback(); time.Sleep(100*time.Millisecond); continue }
+        if _, err := tx.ExecContext(ctx, `UPDATE jobs SET status='running', started_at=now() WHERE id=$1`, id); err != nil { _ = tx.Rollback(); continue }
+        if err := tx.Commit(); err != nil { continue }
+
+        var rr RunRequest
+        _ = json.Unmarshal(reqBody, &rr)
+        workersBusyGauge.Inc()
+        runCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+        runningMu.Lock(); running[id] = cancel; runningMu.Unlock()
+        start := time.Now()
+        out, execErr := execRun(runCtx, rr)
+        dur := time.Since(start).Milliseconds()
+        runningMu.Lock(); delete(running, id); runningMu.Unlock()
+        workersBusyGauge.Dec()
+
+        if execErr != nil {
+            status := "failed"
+            if runCtx.Err() != nil { status = "canceled" }
+            _, _ = db.ExecContext(ctx, `UPDATE jobs SET status=$2, error=$3, finished_at=now(), duration_ms=$4 WHERE id=$1`, id, status, execErr.Error(), dur)
+            jobsCompleted.WithLabelValues(status).Inc(); continue
+        }
+        _, _ = db.ExecContext(ctx, `UPDATE jobs SET status='done', result_json=$2, finished_at=now(), duration_ms=$3 WHERE id=$1`, id, out, dur)
+        jobsCompleted.WithLabelValues("done").Inc()
+    }
+}
+
 func genID() string {
 	// simple time-based id
 	return fmt.Sprintf("%d", time.Now().UnixNano())
@@ -380,6 +533,14 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, errorResp{Error: err.Error()})
 		return
 	}
+    if useDB {
+        id, err := dbEnqueue(r.Context(), req)
+        if err != nil { writeJSON(w, 500, errorResp{Error: err.Error()}); return }
+        jobsSubmitted.Inc()
+        slog.Info("job_submit", "job_id", id, "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads)
+        writeJSON(w, 202, map[string]string{"job_id": id})
+        return
+    }
 	id := genID()
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
     job := &Job{ID: id, Status: JobPending, CreatedAt: time.Now(), cancel: cancel}
@@ -437,6 +598,21 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, 400, errorResp{Error: "missing job id"})
         return
     }
+    if useDB {
+        if j, err := dbGetJob(r.Context(), id); err == nil {
+            writeJSON(w, 200, map[string]any{
+                "id": j.ID,
+                "status": j.Status,
+                "error": j.Error,
+                "result": j.Result,
+                "created_at": j.CreatedAt,
+                "started_at": j.StartedAt.Time,
+                "finished_at": j.FinishedAt.Time,
+                "duration_ms": j.DurationMs.Int64,
+            })
+            return
+        }
+    }
     if j, ok := jobs.get(id); ok {
         j.mu.Lock()
         resp := struct{
@@ -473,6 +649,14 @@ func cancelJobHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, errorResp{Error: "missing job id"})
 		return
 	}
+    if useDB {
+        runningMu.Lock(); c := running[id]; runningMu.Unlock()
+        if c != nil { c() }
+        _, _ = db.ExecContext(r.Context(), `UPDATE jobs SET status='canceled' WHERE id=$1 AND status='pending'`, id)
+        slog.Warn("job_cancel_request", "job_id", id)
+        writeJSON(w, 200, map[string]string{"status": "cancelled"})
+        return
+    }
     if j, ok := jobs.get(id); ok {
         if j.cancel != nil {
             j.cancel()
@@ -600,6 +784,62 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
     _, _ = w.Write([]byte("ready"))
 }
 
+// =============== Auth (X-API-Key) ===============
+
+var apiKeysMu sync.RWMutex
+var apiKeys = map[string]struct{}{}
+
+func loadAPIKeys() {
+    apiKeysMu.Lock(); defer apiKeysMu.Unlock()
+    apiKeys = map[string]struct{}{}
+    if v := os.Getenv("BENCHSORT_API_KEYS"); v != "" {
+        for _, s := range strings.Split(v, ",") {
+            k := strings.TrimSpace(s)
+            if k != "" { apiKeys[k] = struct{}{} }
+        }
+    }
+    if fp := os.Getenv("BENCHSORT_API_KEYS_FILE"); fp != "" {
+        if b, err := os.ReadFile(fp); err == nil {
+            for _, line := range strings.Split(string(b), "\n") {
+                k := strings.TrimSpace(line); if k != "" { apiKeys[k] = struct{}{} }
+            }
+        }
+    }
+}
+
+func requireAPIKey(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        key := strings.TrimSpace(r.Header.Get("X-API-Key"))
+        if key == "" {
+            // Fallback: Authorization: Bearer <key>
+            auth := strings.TrimSpace(r.Header.Get("Authorization"))
+            const pfx = "Bearer "
+            if strings.HasPrefix(auth, pfx) {
+                key = strings.TrimSpace(auth[len(pfx):])
+            }
+        }
+        apiKeysMu.RLock(); _, ok := apiKeys[key]; apiKeysMu.RUnlock()
+        if !ok { writeJSON(w, 401, errorResp{Error: "unauthorized"}); return }
+        next.ServeHTTP(w, r)
+    })
+}
+
+// Execute a run and return JSON bytes
+func execRun(ctx context.Context, req RunRequest) ([]byte, error) {
+    if os.Getenv("SORTBENCH_CGO") == "1" {
+        return runCGO(req)
+    }
+    args := buildArgs(&req)
+    cmd := exec.CommandContext(ctx, sbPath(), args...)
+    out, err := cmd.Output()
+    if err != nil {
+        var ee *exec.ExitError
+        if errors.As(err, &ee) { return nil, fmt.Errorf("sortbench failed: %s", string(ee.Stderr)) }
+        return nil, err
+    }
+    return out, nil
+}
+
 func main() {
     // structured JSON logs with optional level
     lvl := new(slog.LevelVar)
@@ -616,22 +856,24 @@ func main() {
     mux.Handle("/healthz", withMetrics("healthz", healthHandler))
     mux.Handle("/readyz", withMetrics("readyz", readyHandler))
     mux.Handle("/meta", withMetrics("meta", metaHandler))
+    mux.Handle("/limits", withMetrics("limits", limitsHandler))
     mux.Handle("/run", withRateLimit(withMetrics("run", runHandler)))
-    mux.Handle("/jobs", withRateLimit(withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
+    mux.Handle("/jobs", requireAPIKey(withRateLimit(withMetrics("jobs_root", func(w http.ResponseWriter, r *http.Request) {
         if r.Method == http.MethodPost {
             // enforce max jobs cap
-            if maxJobs > 0 {
-                if jobs.activeCount() >= maxJobs {
-                    writeJSON(w, 429, errorResp{Error: "too many jobs"})
-                    return
-                }
+            if maxJobs > 0 && !useDB {
+                if jobs.activeCount() >= maxJobs { writeJSON(w, 429, errorResp{Error: "too many jobs"}); return }
+            } else if maxJobs > 0 && useDB {
+                var active int
+                _ = db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')`).Scan(&active)
+                if active >= maxJobs { writeJSON(w, 429, errorResp{Error: "too many jobs"}); return }
             }
             submitJobHandler(w, r)
             return
         }
         w.WriteHeader(405)
-    })))
-    mux.Handle("/jobs/", withRateLimit(withMetrics("jobs_item", func(w http.ResponseWriter, r *http.Request) {
+    }))))
+    mux.Handle("/jobs/", requireAPIKey(withRateLimit(withMetrics("jobs_item", func(w http.ResponseWriter, r *http.Request) {
         if strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
             cancelJobHandler(w, r)
             return
@@ -641,7 +883,7 @@ func main() {
             return
         }
         w.WriteHeader(405)
-    })))
+    }))))
     // Optional env config caps
     if v := os.Getenv("MAX_N"); v != "" {
         if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 { maxN = n }
@@ -657,6 +899,17 @@ func main() {
     }
     if v := os.Getenv("TIMEOUT_MS"); v != "" {
         if n, err := strconv.Atoi(v); err == nil && n > 0 { defaultTimeout = time.Duration(n) * time.Millisecond }
+    }
+    if v := os.Getenv("WORKERS"); v != "" { if n, err := strconv.Atoi(v); err == nil && n > 0 { workerCount = n } }
+    loadAPIKeys()
+    apiKeysMu.RLock(); keyCount := len(apiKeys); apiKeysMu.RUnlock()
+    slog.Info("api_keys_loaded", "count", keyCount)
+    // Init DB and start workers if configured
+    if err := initDB(context.Background()); err != nil {
+        slog.Error("db_init_failed", "error", err.Error())
+    } else if useDB {
+        wctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
+        for i := 0; i < workerCount; i++ { go workerLoop(wctx) }
     }
 
     addr := ":8080"

@@ -1,0 +1,201 @@
+openapi: 3.0.3
+info:
+  title: BenchSort API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness check
+      responses:
+        '200': { description: Ready }
+        '500': { description: Not ready }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200': { description: Prometheus text format }
+  /limits:
+    get:
+      summary: Service limits and config
+      responses:
+        '200':
+          description: Limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Limits'
+  /meta:
+    get:
+      summary: Supported types, distributions, and algorithm names per type
+      parameters:
+        - name: plugin
+          in: query
+          schema: { type: string }
+          description: Optional plugin .so path; can be repeated.
+      responses:
+        '200':
+          description: Metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetaResponse'
+  /run:
+    post:
+      summary: Run a synchronous benchmark
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunRequest' }
+      responses:
+        '200':
+          description: Array of result rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ResultRow' }
+        '400': { description: Invalid request }
+        '500': { description: Run failed }
+  /jobs:
+    post:
+      summary: Submit an async benchmark job
+      security: [ { ApiKeyAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunRequest' }
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }
+        '401': { description: Unauthorized }
+        '429': { description: Too many jobs }
+  /jobs/{id}:
+    get:
+      summary: Get job status/result
+      security: [ { ApiKeyAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+  /jobs/{id}/cancel:
+    post:
+      summary: Cancel a job
+      security: [ { ApiKeyAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Canceled }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    Limits:
+      type: object
+      properties:
+        max_n: { type: integer, format: int64 }
+        max_repeats: { type: integer }
+        max_threads: { type: integer }
+        max_jobs: { type: integer }
+        workers: { type: integer }
+        timeout_ms: { type: integer }
+        rate_r_per_min: { type: integer }
+        rate_burst: { type: integer }
+        trust_xff: { type: boolean }
+        mode: { type: string, enum: [shell, cgo] }
+        db_enabled: { type: boolean }
+    MetaResponse:
+      type: object
+      properties:
+        types:
+          type: array
+          items: { type: string }
+        dists:
+          type: array
+          items: { type: string }
+        algos:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+    RunRequest:
+      type: object
+      required: [ N, dist, type ]
+      properties:
+        N: { type: integer, format: int64 }
+        dist: { type: string }
+        type: { type: string }
+        repeats: { type: integer }
+        warmup: { type: integer }
+        seed: { type: integer, format: int64 }
+        algos:
+          type: array
+          items: { type: string }
+        threads: { type: integer }
+        assert_sorted: { type: boolean }
+        baseline: { type: string }
+        plugins:
+          type: array
+          items: { type: string }
+        timeout_ms: { type: integer }
+        partial_shuffle_pct: { type: integer }
+        dup_values: { type: integer }
+        zipf_s: { type: number, format: double }
+        runs_alpha: { type: number, format: double }
+        stagger_block: { type: integer }
+    ResultRow:
+      type: object
+      properties:
+        algo: { type: string }
+        N: { type: integer, format: int64 }
+        dist: { type: string }
+        median_ms: { type: number, format: double }
+        mean_ms: { type: number, format: double }
+        min_ms: { type: number, format: double }
+        max_ms: { type: number, format: double }
+        stddev_ms: { type: number, format: double }
+        speedup_vs_baseline: { type: number, format: double }
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, running, done, failed, canceled] }
+        error: { type: string }
+        result: { type: object }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        duration_ms: { type: integer }
+

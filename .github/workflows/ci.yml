@@ -9,6 +9,17 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        ports: ['5432:5432']
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres" 
+          --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
@@ -32,10 +43,45 @@ jobs:
           CGO_ENABLED: 1
         run: |
           SORTBENCH_CGO=1 go build .
+      - name: Upload OpenAPI spec
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: api/openapi.yaml
+      - name: Integration test (DB jobs)
+        env:
+          PORT: 8098
+          SORTBENCH_BIN: ./sortbench
+          BENCHSORT_API_KEYS: testkey
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+          WORKERS: 2
+        run: |
+          cd api/go
+          go build -o ../../sortbench-api .
+          cd ../..
+          # Wait for DB health
+          sleep 5
+          ./sortbench-api & echo $! > api.pid
+          sleep 1
+          # submit and poll
+          JOB_ID=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' -H 'X-API-Key: testkey' \
+            -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
+          [ -n "$JOB_ID" ]
+          for i in $(seq 1 60); do
+            S=$(curl -fsS -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB_ID} | jq -r '.status')
+            if [ "$S" = "done" ] || [ "$S" = "failed" ] || [ "$S" = "canceled" ]; then echo "$S"; break; fi
+            sleep 0.2
+          done
+          # cancel a second job quickly
+          JOB2=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' -H 'X-API-Key: testkey' \
+            -d '{"N":80000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
+          curl -fsS -X POST -H 'X-API-Key: testkey' http://localhost:${PORT}/jobs/${JOB2}/cancel
+          kill $(cat api.pid) || true
       - name: Integration test (shell-out API)
         env:
           PORT: 8099
           SORTBENCH_BIN: ./sortbench
+          BENCHSORT_API_KEYS: testkey
         run: |
           cd api/go
           go build -o ../../sortbench-api .
@@ -50,7 +96,7 @@ jobs:
           curl -fsS -X POST http://localhost:${PORT}/run -H 'Content-Type: application/json' \
             -d '{"N":256,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"],"assert_sorted":true}' | jq -e 'type=="array" and length >= 1'
           # jobs submit + poll
-          JOB_ID=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' \
+          JOB_ID=$(curl -fsS -X POST http://localhost:${PORT}/jobs -H 'Content-Type: application/json' -H 'X-API-Key: testkey' \
             -d '{"N":50000,"dist":"runs","type":"i32","repeats":1,"algos":["std_sort"]}' | jq -r '.job_id')
           echo "job=$JOB_ID"
           for i in $(seq 1 40); do
