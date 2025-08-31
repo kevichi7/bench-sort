@@ -9,7 +9,7 @@ It reports per‑run stats (median/mean/min/max/stddev), can render plots via gn
 ## Features
 
 - Algorithms: `std::sort`, `std::stable_sort`, heap sort, iterative merge sort, `timsort`, quicksort hybrid, radix (for integral types), optional PDQSort, and user plugins.
-- Distributions: `random`, `partial`, `dups`, `reverse`, plus `sorted`, `saw`, `runs`, `gauss`, `exp`, `zipf`.
+- Distributions: `random`, `partial`, `dups`, `reverse`, plus `sorted`, `saw`, `runs`, `gauss`, `exp`, `zipf`, `organpipe`, `staggered`, `runs_ht`.
 - Element types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `str`.
 - Repeats, warmup, verification, CSV/table/JSON/JSONL output, per‑run stats.
 - Plotting: single plot or multiplot across multiple distributions (boxes or lines style).
@@ -70,6 +70,9 @@ Print the compiler flags used by the build:
 - `gauss`: Gaussian/normal; ints mapped and clamped.
 - `exp`: exponential (positive skew); ints/floats supported.
 - `zipf`: skewed duplicates over K values (`--dups-k`), Zipf s≈1.2.
+- `organpipe`: values increase then decrease, forming an organ-pipe pattern.
+- `staggered`: values arranged in staggered blocks (size via `--stagger-block`).
+- `runs_ht`: sorted runs with heavy-tailed run lengths (alpha via `--runs-alpha`).
 
 Specify multiple distributions:
 

@@ -28,6 +28,10 @@ enum sb_dist {
   SB_DIST_GAUSS = 7,
   SB_DIST_EXP = 8,
   SB_DIST_ZIPF = 9,
+  // New distributions — keep values in sync with sortbench::Dist
+  SB_DIST_ORGANPIPE = 10,
+  SB_DIST_STAGGERED = 11,
+  SB_DIST_RUNS_HT = 12,
 };
 
 typedef struct sb_core_config {
@@ -63,4 +67,3 @@ void sb_free(char* p);
 #ifdef __cplusplus
 }
 #endif
-

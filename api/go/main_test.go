@@ -54,3 +54,23 @@ func TestRunSmall(t *testing.T) {
 		t.Fatalf("unexpected status: %d", resp.StatusCode)
 	}
 }
+
+func TestDistsIncludesNewOnes(t *testing.T) {
+    have := map[string]bool{}
+    for _, d := range dists() { have[d] = true }
+    want := []string{"organpipe", "staggered", "runs_ht"}
+    for _, w := range want {
+        if !have[w] {
+            t.Fatalf("missing dist %q in dists()", w)
+        }
+    }
+}
+
+func TestValidateAcceptsNewDists(t *testing.T) {
+    for _, d := range []string{"organpipe", "staggered", "runs_ht"} {
+        req := RunRequest{N: 16, Dist: d, Type: "i32", Repeats: 0}
+        if err := validate(&req); err != nil {
+            t.Fatalf("validate rejected dist %s: %v", d, err)
+        }
+    }
+}

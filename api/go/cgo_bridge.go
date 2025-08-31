@@ -36,29 +36,35 @@ func elemTypeCode(t string) (int, error) {
 }
 
 func distCode(d string) (int, error) {
-	switch d {
-	case "random":
-		return int(C.SB_DIST_RANDOM), nil
-	case "partial":
-		return int(C.SB_DIST_PARTIAL), nil
-	case "dups":
-		return int(C.SB_DIST_DUPS), nil
-	case "reverse":
-		return int(C.SB_DIST_REVERSE), nil
-	case "sorted":
-		return int(C.SB_DIST_SORTED), nil
-	case "saw":
-		return int(C.SB_DIST_SAW), nil
-	case "runs":
-		return int(C.SB_DIST_RUNS), nil
-	case "gauss":
-		return int(C.SB_DIST_GAUSS), nil
-	case "exp":
-		return int(C.SB_DIST_EXP), nil
-	case "zipf":
-		return int(C.SB_DIST_ZIPF), nil
-	}
-	return 0, fmt.Errorf("invalid dist")
+    switch d {
+    case "random":
+        return int(C.SB_DIST_RANDOM), nil
+    case "partial":
+        return int(C.SB_DIST_PARTIAL), nil
+    case "dups":
+        return int(C.SB_DIST_DUPS), nil
+    case "reverse":
+        return int(C.SB_DIST_REVERSE), nil
+    case "sorted":
+        return int(C.SB_DIST_SORTED), nil
+    case "saw":
+        return int(C.SB_DIST_SAW), nil
+    case "runs":
+        return int(C.SB_DIST_RUNS), nil
+    case "gauss":
+        return int(C.SB_DIST_GAUSS), nil
+    case "exp":
+        return int(C.SB_DIST_EXP), nil
+    case "zipf":
+        return int(C.SB_DIST_ZIPF), nil
+    case "organpipe":
+        return int(C.SB_DIST_ORGANPIPE), nil
+    case "staggered":
+        return int(C.SB_DIST_STAGGERED), nil
+    case "runs_ht":
+        return int(C.SB_DIST_RUNS_HT), nil
+    }
+    return 0, fmt.Errorf("invalid dist")
 }
 
 // allocates a C array of char* and fills it with C.CString copies of strs

@@ -95,7 +95,7 @@ func sbPath() string {
 
 func types() []string { return []string{"i32", "u32", "i64", "u64", "f32", "f64", "str"} }
 func dists() []string {
-	return []string{"random", "partial", "dups", "reverse", "sorted", "saw", "runs", "gauss", "exp", "zipf"}
+	return []string{"random", "partial", "dups", "reverse", "sorted", "saw", "runs", "gauss", "exp", "zipf", "organpipe", "staggered", "runs_ht"}
 }
 
 func metaHandler(w http.ResponseWriter, r *http.Request) {
@@ -432,21 +432,24 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
             return
         }
     }
-    // tiny smoke run
-    req := RunRequest{N: 256, Dist: "runs", Type: "i32", Repeats: 1, Algos: []string{"std_sort"}, TimeoutMs: 5000}
-    if os.Getenv("SORTBENCH_CGO") == "1" {
-        if _, err := runCGO(req); err != nil {
-            writeJSON(w, 500, errorResp{Error: "smoke run failed: " + err.Error()})
-            return
-        }
-    } else {
-        ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-        defer cancel()
-        args := buildArgs(&req)
-        cmd := exec.CommandContext(ctx, sbPath(), args...)
-        if _, err := cmd.Output(); err != nil {
-            writeJSON(w, 500, errorResp{Error: "smoke run failed"})
-            return
+    // tiny smoke run across a few distributions (keep very small and quick)
+    smallDists := []string{"runs", "organpipe", "staggered", "runs_ht"}
+    for _, d := range smallDists {
+        req := RunRequest{N: 128, Dist: d, Type: "i32", Repeats: 1, Algos: []string{"std_sort"}, TimeoutMs: 5000}
+        if os.Getenv("SORTBENCH_CGO") == "1" {
+            if _, err := runCGO(req); err != nil {
+                writeJSON(w, 500, errorResp{Error: "smoke run failed: " + err.Error()})
+                return
+            }
+        } else {
+            ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+            defer cancel()
+            args := buildArgs(&req)
+            cmd := exec.CommandContext(ctx, sbPath(), args...)
+            if _, err := cmd.Output(); err != nil {
+                writeJSON(w, 500, errorResp{Error: "smoke run failed"})
+                return
+            }
         }
     }
     w.WriteHeader(200)

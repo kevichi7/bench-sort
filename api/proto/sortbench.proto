@@ -25,6 +25,9 @@ enum Dist {
   DIST_GAUSS = 7;
   DIST_EXP = 8;
   DIST_ZIPF = 9;
+  DIST_ORGANPIPE = 10;
+  DIST_STAGGERED = 11;
+  DIST_RUNS_HT = 12;
 }
 
 message MetaRequest {
@@ -89,4 +92,3 @@ service SortBench {
   // Optional: stream progress/results as they complete
   // rpc RunStream (RunRequest) returns (stream ResultRow);
 }
-
