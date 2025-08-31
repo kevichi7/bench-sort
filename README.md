@@ -4,7 +4,7 @@ sortbench is a high‑performance sorting benchmark with:
 - A self‑contained C++ CLI for benchmarking algorithms across sizes, element types, and input distributions.
 - A reusable C++ core library used by the CLI and server.
 - An optional Go HTTP API (shell‑out or cgo) exposing sync and async benchmarking endpoints.
-It reports per‑run stats (median/mean/min/max/stddev), can render plots via gnuplot, and supports runtime‑loadable plugins (multi‑type ABI).
+It reports per‑run stats (median/mean/min/max/stddev), can render plots via gnuplot, and supports runtime‑loadable plugins (multi‑type ABI). A compact Go HTTP API wraps the core to provide sync runs, async jobs, a small web UI, and metrics.
 
 ## Features
 
@@ -27,11 +27,17 @@ make plugins    # build example plugins
 make api-go     # (cd api/go && go mod tidy && go build .)
 PORT=8080 api/go/sortbench-api   # or: cd api/go && go run .
 
-# Build + run the Go API (cgo mode; calls core directly)
+# Build + run the Go API (CGO mode; calls core directly)
 make            # builds libsortbench_core.a
 make api-go-cgo
 PORT=8080 SORTBENCH_CGO=1 api/go/sortbench-api
 ```
+
+Notes:
+- The API can run in two modes:
+  - shell-out (default): spawns the CLI for discovery and runs.
+  - CGO (set `SORTBENCH_CGO=1` and build with `-tags sortbench_cgo`): links core in-process for faster runs and discovery.
+- When `SORTBENCH_CGO=1` is set but the binary wasn’t built with the tag, the API automatically falls back to shell-out. Startup logs indicate the effective mode.
 
 Print the compiler flags used by the build:
 
@@ -89,6 +95,9 @@ Specify multiple distributions:
 - `pdqsort` (if header present at build).
 - Parallel variants (if headers present): `std_sort_par`, `std_sort_par_unseq`, `gnu_parallel_sort`.
 - `custom`, `customv2` (if `custom_algo.hpp` is available for the chosen type).
+
+UI tips:
+- Algorithms are populated from `/meta`. If you add plugin paths in the UI (Advanced → Plugins), the server will include those for discovery and you’ll see extra algorithms (e.g., from C/Rust/Zig plugins). Use absolute plugin paths if running the API from a subdirectory (like `api/go`).
 
 Filter algorithms:
 
@@ -292,7 +301,7 @@ The API enforces caps; all configurable via env vars (defaults in parentheses):
 - `TIMEOUT_MS` (120000)
 - `PORT` (8080)
 - `SORTBENCH_BIN` (path to CLI for shell‑out mode)
-- `SORTBENCH_CGO` (set to `1` to use in‑process core)
+- `SORTBENCH_CGO` (set to `1` to prefer in‑process core; build with `-tags sortbench_cgo`)
 
 ### Docker
 
@@ -306,6 +315,21 @@ docker run --rm -p 8080:8080 -e SORTBENCH_CGO=1 sortbench-api
 ### CI
 
 GitHub Actions workflow builds the core, runs C++ core tests, and builds the Go API.
+
+DB‑backed integration tests:
+- A Postgres 15 service is started and the API runs with `DATABASE_URL` set. The workflow waits for Postgres readiness (`pg_isready`) and then gates on `/limits.db_enabled == true` before submitting jobs.
+- Job polling tolerates transient HTTP errors and has a sane timeout. The workflow also performs a cancel test.
+- Rate limits are raised in CI to avoid 429s during tight polling (`RATE_LIMIT_R` and `RATE_LIMIT_B`).
+
+Local DB run:
+```
+export DATABASE_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
+export BENCHSORT_API_KEYS_FILE=keys.txt  # create with one key per line
+cd api/go && go run .
+# or build and run the static binary under api/go
+```
+
+The `/limits` endpoint shows whether DB is enabled and the effective mode (shell/cgo).
 
 ---
 
