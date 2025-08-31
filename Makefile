@@ -12,6 +12,11 @@ CORE_SRC := src/sortbench_core.cpp src/sortbench_format.cpp src/sortbench_capi.c
 CORE_OBJ := $(CORE_SRC:.cpp=.o)
 CORE_LIB := libsortbench_core.a
 
+# CGO-safe core (no -march=native) for in-process linking
+CORE_LIB_CGO := libsortbench_core_cgo.a
+CXXFLAGS_CGO := -O3 -pipe -std=c++20 -Wall -Wextra -Wshadow -Wconversion -Wno-sign-conversion -fopenmp
+
+
 .PHONY: all clean run
 
 all: $(TARGET) $(CORE_LIB)
@@ -39,6 +44,22 @@ $(TEST_BIN): $(CORE_LIB) $(TEST_SRC)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
+
+# Build CGO-safe core library (no -march=native)
+.PHONY: core-cgo
+core-cgo: $(CORE_LIB_CGO)
+
+$(CORE_LIB_CGO): src/sortbench_core.cgo.o src/sortbench_format.cgo.o src/sortbench_capi.cgo.o
+	ar rcs $@ $^
+
+src/sortbench_core.cgo.o: src/sortbench_core.cpp
+	$(CXX) $(CXXFLAGS_CGO) -I$(CORE_INC) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS_CGO)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -c -o $@ $<
+
+src/sortbench_format.cgo.o: src/sortbench_format.cpp
+	$(CXX) $(CXXFLAGS_CGO) -I$(CORE_INC) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS_CGO)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -c -o $@ $<
+
+src/sortbench_capi.cgo.o: src/sortbench_capi.cpp
+	$(CXX) $(CXXFLAGS_CGO) -I$(CORE_INC) -DSORTBENCH_CXX='"$(CXX)"' -DSORTBENCH_CXXFLAGS='"$(CXXFLAGS_CGO)"' -DSORTBENCH_LDFLAGS='"$(LDFLAGS)"' -c -o $@ $<
 
 # Go API helpers
 .PHONY: api-go api-go-cgo

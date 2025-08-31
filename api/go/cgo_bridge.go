@@ -2,7 +2,7 @@ package main
 
 /*
 #cgo CXXFLAGS: -I../../include -std=c++20 -O3
-#cgo LDFLAGS: -L../.. -lsortbench_core -lstdc++ -fopenmp -ldl -ltbb -lm
+#cgo LDFLAGS: -L../.. -lsortbench_core_cgo -lstdc++ -fopenmp -ldl -ltbb -lm
 #include <stdlib.h>
 #include "../../include/sortbench/capi.h"
 */
