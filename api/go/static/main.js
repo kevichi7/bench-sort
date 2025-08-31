@@ -78,7 +78,7 @@ async function init(){
   }catch(e){ qs('limits').textContent = `Failed to load limits: ${e.message}` }
 
   // Meta for selects (+ attempt to include default plugins if available)
-  const defaultPlugins = ['plugins/quicksort_dp.so'];
+  const defaultPlugins = (window.SORTBENCH_CGO === '1') ? [] : ['plugins/quicksort_dp.so'];
   let meta;
   try {
     let metaURL = '/meta';

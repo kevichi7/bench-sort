@@ -121,8 +121,19 @@ func dists() []string {
 }
 
 func metaHandler(w http.ResponseWriter, r *http.Request) {
-	// Optional plugin=path query can be repeated
-	plugins := r.URL.Query()["plugin"]
+    // Optional plugin=path query can be repeated
+    plugins := r.URL.Query()["plugin"]
+    if os.Getenv("SORTBENCH_CGO") == "1" {
+        // Filter to existing files in CGO mode
+        filtered := make([]string, 0, len(plugins))
+        for _, p := range plugins {
+            if p == "" { continue }
+            if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+                filtered = append(filtered, p)
+            }
+        }
+        plugins = filtered
+    }
 	algos := make(map[string][]string)
 	for _, t := range types() {
 		var names []string
@@ -224,6 +235,20 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), tout)
 	defer cancel()
     if os.Getenv("SORTBENCH_CGO") == "1" {
+        // In CGO mode, drop any plugin paths that do not exist to avoid
+        // dlopen of invalid paths inside the C++ core.
+        if len(req.Plugins) > 0 {
+            filtered := make([]string, 0, len(req.Plugins))
+            for _, p := range req.Plugins {
+                if p == "" { continue }
+                if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+                    filtered = append(filtered, p)
+                } else {
+                    slog.Warn("plugin_skip_missing", "path", p)
+                }
+            }
+            req.Plugins = filtered
+        }
         out, err := runCGO(req)
         if err != nil {
             writeJSON(w, 500, errorResp{Error: err.Error()})
@@ -613,6 +638,7 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
     }
     if useDB {
         if j, err := dbGetJob(r.Context(), id); err == nil {
+            slog.Debug("db_job_get", "job_id", id, "status", j.Status)
             writeJSON(w, 200, map[string]any{
                 "id": j.ID,
                 "status": j.Status,
@@ -628,6 +654,7 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
             // Be tolerant during immediate post-submit polls: if the row is not
             // yet visible for any reason, return a non-error pending status so
             // callers using retry loops don't fail on a transient 404.
+            slog.Debug("db_job_get_pending", "job_id", id)
             writeJSON(w, 200, map[string]any{
                 "id": id,
                 "status": "pending",
