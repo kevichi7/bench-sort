@@ -256,7 +256,7 @@ static std::size_t parse_size_expr(const std::string &s) {
 static void print_usage(const char *argv0) {
   std::cerr << "Usage: " << argv0
             << " [--N size|start-end] [--dist "
-               "random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf]"
+               "random|partial|dups|reverse|sorted|saw|runs|gauss|exp|zipf|organpipe|staggered|runs_ht]"
                " [--repeat k] [--warmup w] [--algo name[,name...]] [--seed s] "
                "[--no-header] "
                "[--verify]"
@@ -284,9 +284,6 @@ static void print_usage(const char *argv0) {
                "default i32)\n";
   std::cerr << "       --assert-sorted (check each run result is sorted; fails "
                "fast)\n";
-  std::cerr << "       --zipf-s S (Zipf skew, default 1.2)\n";
-  std::cerr << "       --runs-alpha A (heavy-tail alpha for runs_ht, default 1.5)\n";
-  std::cerr << "       --stagger-block B (block size for 'staggered', default 32)\n";
   std::cerr << "       --zipf-s S (Zipf skew, default 1.2)\n";
   std::cerr << "       --runs-alpha A (heavy-tail alpha for runs_ht, default 1.5)\n";
   std::cerr << "       --stagger-block B (block size for 'staggered', default 32)\n";

@@ -10,8 +10,10 @@ import (
     "net/http"
     "os"
     "os/exec"
+    "os/signal"
     "strconv"
     "strings"
+    "sync"
     "time"
 
     "github.com/prometheus/client_golang/prometheus"
@@ -36,6 +38,8 @@ var (
     jobsRunningGauge = promauto.NewGauge(prometheus.GaugeOpts{Name: "sortbench_jobs_running", Help: "Number of running async jobs"})
     jobsSubmitted    = promauto.NewCounter(prometheus.CounterOpts{Name: "sortbench_jobs_submitted_total", Help: "Total async jobs submitted"})
     jobsCompleted    = promauto.NewCounterVec(prometheus.CounterOpts{Name: "sortbench_jobs_completed_total", Help: "Total async jobs completed by result"}, []string{"result"})
+    runDuration      = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "sortbench_run_duration_seconds", Help: "Duration of benchmark runs", Buckets: prometheus.DefBuckets}, []string{"mode", "dist", "type"})
+    jobsDuration     = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "sortbench_job_duration_seconds", Help: "Duration of async jobs", Buckets: prometheus.DefBuckets}, []string{"result"})
 )
 
 type MetaResponse struct {
@@ -147,7 +151,8 @@ func listAlgos(typ string, plugins []string) ([]string, error) {
 func runHandler(w http.ResponseWriter, r *http.Request) {
     start := time.Now()
     var req RunRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    // Limit request body to 1MB
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
         writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
         slog.Warn("run_invalid_json", "error", err.Error())
         return
@@ -173,6 +178,8 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(200)
         _, _ = w.Write(out)
+        reqTotal.WithLabelValues("run", "200").Inc() // ensure count even if wrapper missing
+        runDuration.WithLabelValues("cgo", req.Dist, req.Type).Observe(time.Since(start).Seconds())
         slog.Info("run_ok", "mode", "cgo", "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
         return
     }
@@ -194,6 +201,8 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(200)
         _, _ = w.Write(out)
+        reqTotal.WithLabelValues("run", "200").Inc()
+        runDuration.WithLabelValues("shell", req.Dist, req.Type).Observe(time.Since(start).Seconds())
         slog.Info("run_ok", "mode", "shell", "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads, "duration_ms", time.Since(start).Milliseconds())
     }
 }
@@ -225,27 +234,45 @@ const (
 )
 
 type Job struct {
-	ID         string          `json:"id"`
-	Status     JobStatus       `json:"status"`
-	Error      string          `json:"error,omitempty"`
-	ResultJSON json.RawMessage `json:"result,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	StartedAt  time.Time       `json:"started_at,omitempty"`
-	FinishedAt time.Time       `json:"finished_at,omitempty"`
-	DurationMs int64           `json:"duration_ms,omitempty"`
-	cancel     context.CancelFunc
+    ID         string          `json:"id"`
+    Status     JobStatus       `json:"status"`
+    Error      string          `json:"error,omitempty"`
+    ResultJSON json.RawMessage `json:"result,omitempty"`
+    CreatedAt  time.Time       `json:"created_at"`
+    StartedAt  time.Time       `json:"started_at,omitempty"`
+    FinishedAt time.Time       `json:"finished_at,omitempty"`
+    DurationMs int64           `json:"duration_ms,omitempty"`
+    cancel     context.CancelFunc
+    mu         sync.Mutex
 }
 
-type JobManager struct {
-	m map[string]*Job
-}
+type JobManager struct { m map[string]*Job; mu sync.RWMutex }
 
 var jobs = &JobManager{m: make(map[string]*Job)}
 
-func (jm *JobManager) create(j *Job) {
-	jm.m[j.ID] = j
+func (jm *JobManager) create(j *Job) { jm.mu.Lock(); jm.m[j.ID] = j; jm.mu.Unlock() }
+func (jm *JobManager) get(id string) (*Job, bool) { jm.mu.RLock(); j, ok := jm.m[id]; jm.mu.RUnlock(); return j, ok }
+func (jm *JobManager) activeCount() int {
+    jm.mu.RLock(); defer jm.mu.RUnlock()
+    n := 0
+    for _, j := range jm.m {
+        j.mu.Lock()
+        st := j.Status
+        j.mu.Unlock()
+        if st == JobPending || st == JobRunning { n++ }
+    }
+    return n
 }
-func (jm *JobManager) get(id string) (*Job, bool) { j, ok := jm.m[id]; return j, ok }
+func (jm *JobManager) cancelAll() {
+    jm.mu.RLock(); defer jm.mu.RUnlock()
+    for _, j := range jm.m {
+        j.mu.Lock()
+        if j.Status == JobPending || j.Status == JobRunning {
+            if j.cancel != nil { j.cancel() }
+        }
+        j.mu.Unlock()
+    }
+}
 
 func genID() string {
 	// simple time-based id
@@ -255,7 +282,8 @@ func genID() string {
 // POST /jobs — submit async run
 func submitJobHandler(w http.ResponseWriter, r *http.Request) {
     var req RunRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    // Limit request body to 1MB
+    if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
         writeJSON(w, 400, errorResp{Error: "invalid JSON: " + err.Error()})
         return
 	}
@@ -270,8 +298,12 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
     jobsSubmitted.Inc()
     slog.Info("job_submit", "job_id", id, "N", req.N, "dist", req.Dist, "type", req.Type, "repeats", req.Repeats, "threads", req.Threads)
     go func() {
-        job.Status = JobRunning
-        job.StartedAt = time.Now()
+        job.mu.Lock(); job.Status = JobRunning; job.StartedAt = time.Now(); job.mu.Unlock()
+        if d := os.Getenv("SB_TEST_JOB_DELAY_MS"); d != "" {
+            if ms, err := strconv.Atoi(d); err == nil && ms > 0 {
+                time.Sleep(time.Duration(ms) * time.Millisecond)
+            }
+        }
         jobsRunningGauge.Inc()
         var out []byte
         var err error
@@ -288,26 +320,22 @@ func submitJobHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-        job.FinishedAt = time.Now()
-        job.DurationMs = job.FinishedAt.Sub(job.StartedAt).Milliseconds()
+        job.mu.Lock(); job.FinishedAt = time.Now(); job.DurationMs = job.FinishedAt.Sub(job.StartedAt).Milliseconds(); job.mu.Unlock()
         defer jobsRunningGauge.Dec()
         if err != nil {
             if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
-                job.Status = JobCanceled
-                job.Error = ctx.Err().Error()
-                jobsCompleted.WithLabelValues("canceled").Inc()
+                job.mu.Lock(); job.Status = JobCanceled; job.Error = ctx.Err().Error(); job.mu.Unlock()
+                jobsCompleted.WithLabelValues("canceled").Inc(); jobsDuration.WithLabelValues("canceled").Observe(float64(job.DurationMs) / 1000.0)
                 slog.Warn("job_canceled", "job_id", id, "duration_ms", job.DurationMs)
             } else {
-                job.Status = JobFailed
-                job.Error = err.Error()
-                jobsCompleted.WithLabelValues("failed").Inc()
+                job.mu.Lock(); job.Status = JobFailed; job.Error = err.Error(); job.mu.Unlock()
+                jobsCompleted.WithLabelValues("failed").Inc(); jobsDuration.WithLabelValues("failed").Observe(float64(job.DurationMs) / 1000.0)
                 slog.Error("job_failed", "job_id", id, "error", err.Error(), "duration_ms", job.DurationMs)
             }
             return
         }
-        job.ResultJSON = json.RawMessage(out)
-        job.Status = JobDone
-        jobsCompleted.WithLabelValues("done").Inc()
+        job.mu.Lock(); job.ResultJSON = json.RawMessage(out); job.Status = JobDone; job.mu.Unlock()
+        jobsCompleted.WithLabelValues("done").Inc(); jobsDuration.WithLabelValues("done").Observe(float64(job.DurationMs) / 1000.0)
         slog.Info("job_done", "job_id", id, "duration_ms", job.DurationMs)
     }()
     writeJSON(w, 202, map[string]string{"job_id": id})
@@ -320,11 +348,12 @@ func getJobHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, errorResp{Error: "missing job id"})
 		return
 	}
-	if j, ok := jobs.get(id); ok {
-		writeJSON(w, 200, j)
-	} else {
-		writeJSON(w, 404, errorResp{Error: "not found"})
-	}
+    if j, ok := jobs.get(id); ok {
+        j.mu.Lock(); cj := *j; j.mu.Unlock()
+        writeJSON(w, 200, cj)
+    } else {
+        writeJSON(w, 404, errorResp{Error: "not found"})
+    }
 }
 
 // POST /jobs/{id}/cancel
@@ -477,13 +506,7 @@ func main() {
         if r.Method == http.MethodPost {
             // enforce max jobs cap
             if maxJobs > 0 {
-                active := 0
-                for _, j := range jobs.m {
-                    if j.Status == JobPending || j.Status == JobRunning {
-                        active++
-                    }
-                }
-                if active >= maxJobs {
+                if jobs.activeCount() >= maxJobs {
                     writeJSON(w, 429, errorResp{Error: "too many jobs"})
                     return
                 }
@@ -525,7 +548,26 @@ func main() {
     if v := os.Getenv("PORT"); v != "" {
         addr = ":" + v
     }
-	log.Printf("sortbench API listening on %s (bin=%s)", addr, sbPath())
-	srv := &http.Server{Addr: addr, Handler: mux}
-	log.Fatal(srv.ListenAndServe())
+    log.Printf("sortbench API listening on %s (bin=%s)", addr, sbPath())
+    srv := &http.Server{
+        Addr:              addr,
+        Handler:           mux,
+        ReadHeaderTimeout: 5 * time.Second,
+        ReadTimeout:       15 * time.Second,
+        WriteTimeout:      10 * time.Minute,
+        IdleTimeout:       60 * time.Second,
+        MaxHeaderBytes:    1 << 20,
+    }
+    // Graceful shutdown on SIGINT/SIGTERM
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+    go func() {
+        <-ctx.Done()
+        slog.Warn("shutdown_signal")
+        jobs.cancelAll()
+        sdCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        _ = srv.Shutdown(sdCtx)
+    }()
+    log.Fatal(srv.ListenAndServe())
 }

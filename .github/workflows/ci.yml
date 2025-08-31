@@ -19,8 +19,16 @@ jobs:
         run: make
       - name: Run core tests
         run: make test
-      - name: Build Go API (cgo)
+      - name: Go unit tests (shell-out mode)
+        working-directory: api/go
+        env:
+          SORTBENCH_BIN: ../../sortbench
         run: |
-          cd api/go
           go mod tidy
+          go test -race -v
+      - name: Build Go API (cgo)
+        working-directory: api/go
+        env:
+          CGO_ENABLED: 1
+        run: |
           SORTBENCH_CGO=1 go build .
