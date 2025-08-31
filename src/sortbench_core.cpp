@@ -754,6 +754,11 @@ static bool name_excluded(const std::vector<std::string> &excluded,
   return false;
 }
 
+static bool is_default_slow(const std::string &name) {
+  std::string ln = to_lower(name);
+  return (ln == "bubble_sort" || ln == "insertion_sort" || ln == "selection_sort");
+}
+
 template <class T>
 static double benchmark_once_t(const std::function<void(std::vector<T> &)> &fn,
                                const std::vector<T> &original,
@@ -823,9 +828,13 @@ template <class T> static RunResult run_for_type_core(const CoreConfig &cfg) {
     auto ref = original;
     std::sort(ref.begin(), ref.end());
     for (const auto &algo : regs) {
+      const bool any_includes = (!cfg.algos.empty() || !cfg.algo_regex.empty());
       if (!name_selected(cfg.algos, cfg.algo_regex, algo.name))
         continue;
       if (name_excluded(cfg.exclude_algos, cfg.exclude_regex, algo.name))
+        continue;
+      // Apply default slow excludes only when no explicit include filters are set
+      if (!any_includes && is_default_slow(algo.name))
         continue;
       work = original;
       algo.run(work);
@@ -849,9 +858,12 @@ template <class T> static RunResult run_for_type_core(const CoreConfig &cfg) {
   std::vector<RowTmp> tmp;
 
   for (const auto &algo : regs) {
+    const bool any_includes = (!cfg.algos.empty() || !cfg.algo_regex.empty());
     if (!name_selected(cfg.algos, cfg.algo_regex, algo.name))
       continue;
     if (name_excluded(cfg.exclude_algos, cfg.exclude_regex, algo.name))
+      continue;
+    if (!any_includes && is_default_slow(algo.name))
       continue;
     for (int w = 0; w < cfg.warmup; ++w) {
       (void)benchmark_once_t<T>(algo.run, original, work, cfg.assert_sorted,

@@ -244,7 +244,7 @@ int main() {
 
 Two execution modes:
 - Shell‑out (default): API spawns `./sortbench --format json ...` per request.
-- cgo (set `SORTBENCH_CGO=1`): API calls the C++ core in‑process via a small C layer.
+- cgo (set `SORTBENCH_CGO=1` and build with `-tags sortbench_cgo`): API calls the C++ core in‑process via a small C layer.
 
 Endpoints:
 - `GET /healthz` — liveness.
@@ -324,6 +324,8 @@ GitHub Actions workflow builds the core, runs C++ core tests, and builds the Go 
 - `--build-plugin src.cpp --out lib.so`
 - `--init-plugin [path.cpp]`
 - `--plot out.png|.jpg`, `--plot-title T`, `--plot-size WxH`, `--plot-style boxes|lines`, `--plot-layout RxC`, `--keep-plot-artifacts`
+
+Defaults: when no `--algo`/`--algo-re` is provided, sortbench excludes very slow educational algorithms from runs by default: `bubble_sort`, `insertion_sort`, `selection_sort`. They still appear in `--list` and can be run explicitly by naming them or via regex. Use `--exclude`/`--exclude-re` to add more exclusions.
 
 ## Custom algorithms shim (optional)
 
